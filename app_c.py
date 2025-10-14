@@ -8,7 +8,7 @@ import streamlit as st
 
 # Configuration
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
-CALCOM_API_KEY = st.secrets.get("CALCOM_API_KEY", "")
+CALCOM_API_KEY = os.getenv("CALCOM_API_KEY", "cal_live_5c4cb82d6ae5e45f14fd3209042256c3")  # Set this in your environment
 CALCOM_BASE_URL = "https://api.cal.com/v2"
 
 client = OpenAI(api_key=OPENAI_API_KEY)
