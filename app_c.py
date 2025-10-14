@@ -361,7 +361,7 @@ def execute_function(function_name: str, arguments: Dict, cal_api: CalComAPI) ->
         return json.dumps(result)
     
      elif function_name == "create_booking":
-        result = cal_api.create_booking(
+         result = cal_api.create_booking(
             event_type_id=arguments.get("event_type_id", 1),
             start_time=arguments["start_time"],
             attendee_email=arguments["attendee_email"],
