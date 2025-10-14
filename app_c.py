@@ -434,7 +434,7 @@ def main():
 
         if st.button("Clear Chat History"):
             st.session_state.messages = []
-            st.experimental_rerun()
+            st.rerun()
 
     # Initialize session state
     if "messages" not in st.session_state or not st.session_state.messages:
@@ -485,7 +485,7 @@ def main():
 
         # Add assistant response to history
         st.session_state.messages.append({"role": "assistant", "content": response_text})
-        st.experimental_rerun()
+        st.rerun()
 
 
 if __name__ == "__main__":
