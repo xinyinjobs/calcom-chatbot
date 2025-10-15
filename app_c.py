@@ -18,11 +18,7 @@ except:
     CALCOM_API_KEY = os.getenv("CALCOM_API_KEY", "")
 
 CALCOM_BASE_URL = "https://api.cal.com/v2"
-calcom_key = st.text_input(
-    "Enter your Cal.com API Key",
-    type="password",
-    help="Get it from https://cal.com/settings/developer/api-keys"
-) 
+
 # Validate OpenAI API key
 if not OPENAI_API_KEY:
     st.error("⚠️ OpenAI API key not configured.")
@@ -55,7 +51,7 @@ class CalComAPI:
     def get_event_types(self) -> Dict[str, Any]:
         """Get available event types"""
         try:
-            response = requests.get(f"https://api.cal.com/v2/event-types?apiKey={calcom_key}",
+            response = requests.get(f"https://api.cal.com/v2/event-types?apiKey={api_key}",
                 headers={
                 "Content-Type": "application/json",
                 "cal-api-version": "2024-06-14"  # optional, you can keep your version
@@ -87,7 +83,7 @@ class CalComAPI:
             st.sidebar.info(f"🔍 Checking slots for event type {event_type_id}")
             response = requests.get(
                 "https://api.cal.com/v2/slots",
-                headers={"Authorization": f"Bearer {calcom_key}",
+                headers={"Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
                 "cal-api-version": "2024-09-04",
                 },
