@@ -51,7 +51,12 @@ class CalComAPI:
     def get_event_types(self) -> Dict[str, Any]:
         """Get available event types"""
         try:
-            response = requests.get(f"{CALCOM_BASE_URL}/event-types", headers=self.headers)
+            response = requests.get(f"https://api.cal.com/v2/event-types?apiKey={calcom_key}",
+                headers={
+                "Content-Type": "application/json",
+                "cal-api-version": "2024-06-14"  # optional, you can keep your version
+                },
+                timeout=10)
             response.raise_for_status()
             data = response.json()
             event_types = data.get("data", [])
@@ -76,12 +81,19 @@ class CalComAPI:
         """Get available time slots"""
         try:
             st.sidebar.info(f"🔍 Checking slots for event type {event_type_id}")
-            response = requests.get(
-                f"{CALCOM_BASE_URL}/slots/available",
-                headers=self.headers,
-                params={"eventTypeId": event_type_id, "startTime": start_date, "endTime": end_date},
-                timeout=15
-            )
+           response = requests.get(
+                        "https://api.cal.com/v2/slots",
+                        headers={"Authorization": f"Bearer {calcom_key}",
+                            "Content-Type": "application/json",
+                            "cal-api-version": "2024-09-04",
+                            },
+                        params={
+                            "eventTypeId": event_type_id,
+                            "start": f"{tomorrow}",
+                            "end": f"{tomorrow}",
+                        },
+                        timeout=10
+                    )
             response.raise_for_status()
             data = response.json()
             
