@@ -7,38 +7,45 @@ from openai import OpenAI
 import streamlit as st
 
 # Configuration
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "") if hasattr(st, "secrets") else os.environ.get("OPENAI_API_KEY", "")
-CALCOM_API_KEY = os.getenv("CALCOM_API_KEY", "")  # set in environment or sidebar
+try:
+    OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
+except:
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+
+try:
+    CALCOM_API_KEY = st.secrets.get("CALCOM_API_KEY", "")
+except:
+    CALCOM_API_KEY = os.getenv("CALCOM_API_KEY", "")
+
 CALCOM_BASE_URL = "https://api.cal.com/v2"
 
 # Validate OpenAI API key
 if not OPENAI_API_KEY:
-    st.error("⚠️ OpenAI API key not configured. Put it in Streamlit secrets or set OPENAI_API_KEY env var.")
+    st.error("⚠️ OpenAI API key not configured.")
     st.stop()
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Timezone utilities
 def format_time_pst(iso_time: str) -> str:
-    """Convert ISO time to readable PST format (assumes input UTC or ISO with offset)."""
+    """Convert ISO time to readable PST format"""
     try:
-        # Make sure we parse offset aware ISO strings
         dt = datetime.fromisoformat(iso_time.replace("Z", "+00:00"))
-        # PST is UTC-8 (no DST handling here — for production use a tz library)
         pst_offset = timedelta(hours=-8)
         pst_time = dt + pst_offset
         return pst_time.strftime("%Y-%m-%d %I:%M %p PST")
-    except Exception:
+    except:
         return iso_time
 
-# Cal.com API Functions
+
+# Cal.com API Class
 class CalComAPI:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
-            "cal-api-version": "2024-08-13"  # include version header if your instance needs it
+            "cal-api-version": "2024-08-13"
         }
 
     def get_event_types(self) -> Dict[str, Any]:
@@ -51,6 +58,9 @@ class CalComAPI:
 
             if event_types:
                 st.sidebar.success(f"✅ Found {len(event_types)} event types")
+                # Show event type details for debugging
+                for et in event_types[:3]:  # Show first 3
+                    st.sidebar.info(f"Event Type: {et.get('title')} (ID: {et.get('id')})")
             else:
                 st.sidebar.warning("⚠️ No event types found. Configure them in Cal.com first.")
 
@@ -58,13 +68,14 @@ class CalComAPI:
         except requests.exceptions.RequestException as e:
             error_msg = f"❌ Failed to fetch event types: {str(e)}"
             if hasattr(e, "response") and e.response is not None:
-                error_msg += f"\n```\n{e.response.text}\n```"
+                error_msg += f"\n{e.response.text}"
             st.sidebar.error(error_msg)
             return {"success": False, "error": error_msg, "event_types": []}
 
     def get_available_slots(self, event_type_id: Any, start_date: str, end_date: str) -> Dict[str, Any]:
-        """Get available time slots for an event type"""
+        """Get available time slots"""
         try:
+            st.sidebar.info(f"🔍 Checking slots for event type {event_type_id}")
             response = requests.get(
                 f"{CALCOM_BASE_URL}/slots/available",
                 headers=self.headers,
@@ -73,27 +84,24 @@ class CalComAPI:
             )
             response.raise_for_status()
             data = response.json()
-            # API may return shapes such as data -> slots dict or list; handle common cases:
+            
             slots_container = data.get("data", {})
             slots = []
             if isinstance(slots_container, dict):
-                # expected shape: {"slots": {"2025-10-14": ["2025-10-14T10:00:00Z", ...], ...}}
                 inner = slots_container.get("slots", {})
                 for date_key, times in inner.items():
                     if isinstance(times, list):
                         slots.extend(times)
             elif isinstance(slots_container, list):
-                # maybe it's already a flat list
                 slots = slots_container
-            else:
-                slots = []
 
-            available_slots = slots
-            return {"success": True, "slots": available_slots, "count": len(available_slots)}
+            st.sidebar.info(f"📅 Found {len(slots)} available slots")
+            return {"success": True, "slots": slots, "count": len(slots)}
         except requests.exceptions.RequestException as e:
             error_msg = str(e)
             if hasattr(e, "response") and e.response is not None:
-                error_msg += f" | Response: {e.response.text}"
+                error_msg += f" | {e.response.text}"
+            st.sidebar.error(f"❌ Slot check failed: {error_msg}")
             return {"success": False, "error": error_msg, "slots": []}
 
     def create_booking(
@@ -118,83 +126,114 @@ class CalComAPI:
             }
 
             if meeting_reason:
-                # Use metadata or answers depending on your cal.com setup
                 payload["metadata"] = {"reason": meeting_reason}
 
             st.sidebar.info("📤 Creating booking...")
             st.sidebar.code(json.dumps(payload, indent=2), language="json")
 
-            response = requests.post(f"{CALCOM_BASE_URL}/bookings", headers=self.headers, json=payload, timeout=15)
+            response = requests.post(
+                f"{CALCOM_BASE_URL}/bookings", 
+                headers=self.headers, 
+                json=payload, 
+                timeout=15
+            )
+            
             st.sidebar.info(f"📥 Response: {response.status_code}")
+            
+            if response.status_code >= 400:
+                st.sidebar.error(f"Error response: {response.text}")
+            
             response.raise_for_status()
             result = response.json()
             booking_data = result.get("data", {})
 
             st.sidebar.success(f"✅ Booking created! ID: {booking_data.get('id')}, UID: {booking_data.get('uid')}")
-            return {"success": True, "data": booking_data, "booking_id": booking_data.get("id"), "booking_uid": booking_data.get("uid")}
+            return {
+                "success": True, 
+                "data": booking_data, 
+                "booking_id": booking_data.get("id"), 
+                "booking_uid": booking_data.get("uid")
+            }
         except requests.exceptions.RequestException as e:
             error_msg = f"❌ Failed to create booking: {str(e)}"
             if hasattr(e, "response") and e.response is not None:
-                error_msg += f"\nStatus: {e.response.status_code}\nResponse:\n```\n{e.response.text}\n```"
+                error_msg += f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
             st.sidebar.error(error_msg)
             return {"success": False, "error": error_msg}
 
     def get_bookings(self, attendee_email: Optional[str] = None) -> Dict[str, Any]:
-        """Get all bookings, optionally filtered by attendee email"""
+        """Get all bookings"""
         try:
             params = {}
             if attendee_email:
                 params["attendeeEmail"] = attendee_email
 
-            st.sidebar.info(f"📤 Fetching bookings with filters: {params}")
-            response = requests.get(f"{CALCOM_BASE_URL}/bookings", headers=self.headers, params=params, timeout=15)
+            st.sidebar.info(f"📤 Fetching bookings: {params}")
+            response = requests.get(
+                f"{CALCOM_BASE_URL}/bookings", 
+                headers=self.headers, 
+                params=params, 
+                timeout=15
+            )
+            
             st.sidebar.info(f"📥 Response: {response.status_code}")
             response.raise_for_status()
             data = response.json()
             bookings = data.get("data", [])
 
-            # Add formatted times
+            # Format times and add UIDs
             for booking in bookings:
-                if "start" in booking and isinstance(booking["start"], str):
+                if "start" in booking:
                     booking["start_pst"] = format_time_pst(booking["start"])
+                # Make sure UID is visible
+                booking["display_uid"] = booking.get("uid", "N/A")
 
             st.sidebar.success(f"✅ Found {len(bookings)} bookings")
             return {"success": True, "bookings": bookings, "count": len(bookings)}
         except requests.exceptions.RequestException as e:
             error_msg = f"❌ Failed to get bookings: {str(e)}"
             if hasattr(e, "response") and e.response is not None:
-                error_msg += f"\nStatus: {e.response.status_code}\nResponse:\n```\n{e.response.text}\n```"
+                error_msg += f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
             st.sidebar.error(error_msg)
             return {"success": False, "error": error_msg, "bookings": []}
 
     def cancel_booking(self, booking_uid: str, reason: str = "Cancelled by user") -> Dict[str, Any]:
-        """Cancel a booking — use UID (string)"""
+        """Cancel a booking"""
         try:
-            st.sidebar.info(f"📤 Cancelling booking UID: {booking_uid}")
-            # Cal.com may expect POST to /bookings/{uid}/cancel or DELETE /bookings/{uid}
-            # Use delete with json body here as your previous code did; adjust if your instance needs POST.
-            response = requests.delete(f"{CALCOM_BASE_URL}/bookings/{booking_uid}", headers=self.headers, json={"cancellationReason": reason}, timeout=15)
+            st.sidebar.info(f"📤 Cancelling UID: {booking_uid}")
+            response = requests.delete(
+                f"{CALCOM_BASE_URL}/bookings/{booking_uid}", 
+                headers=self.headers, 
+                json={"cancellationReason": reason}, 
+                timeout=15
+            )
+            
             st.sidebar.info(f"📥 Response: {response.status_code}")
             response.raise_for_status()
             st.sidebar.success("✅ Booking cancelled!")
-            return {"success": True, "message": f"Booking {booking_uid} cancelled successfully"}
+            return {"success": True, "message": f"Booking {booking_uid} cancelled"}
         except requests.exceptions.RequestException as e:
             error_msg = f"❌ Failed to cancel: {str(e)}"
             if hasattr(e, "response") and e.response is not None:
-                error_msg += f"\nStatus: {e.response.status_code}\nResponse:\n```\n{e.response.text}\n```"
+                error_msg += f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
             st.sidebar.error(error_msg)
             return {"success": False, "error": error_msg}
 
     def reschedule_booking(self, booking_uid: str, new_start_time: str, reason: str = "") -> Dict[str, Any]:
-        """Reschedule a booking — use UID (string)"""
+        """Reschedule a booking"""
         try:
             payload = {"start": new_start_time}
             if reason:
                 payload["reschedulingReason"] = reason
 
             st.sidebar.info(f"📤 Rescheduling UID: {booking_uid} to {new_start_time}")
-            # Patch or POST depends on Cal.com instance; patch commonly used for updates.
-            response = requests.patch(f"{CALCOM_BASE_URL}/bookings/{booking_uid}", headers=self.headers, json=payload, timeout=15)
+            response = requests.patch(
+                f"{CALCOM_BASE_URL}/bookings/{booking_uid}", 
+                headers=self.headers, 
+                json=payload, 
+                timeout=15
+            )
+            
             st.sidebar.info(f"📥 Response: {response.status_code}")
             response.raise_for_status()
             result = response.json()
@@ -203,18 +242,18 @@ class CalComAPI:
         except requests.exceptions.RequestException as e:
             error_msg = f"❌ Failed to reschedule: {str(e)}"
             if hasattr(e, "response") and e.response is not None:
-                error_msg += f"\nStatus: {e.response.status_code}\nResponse:\n```\n{e.response.text}\n```"
+                error_msg += f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
             st.sidebar.error(error_msg)
             return {"success": False, "error": error_msg}
 
 
-# Function definitions for OpenAI (the "functions" schema)
+# OpenAI function definitions
 tools = [
     {
         "type": "function",
         "function": {
             "name": "get_available_slots",
-            "description": "Get available time slots for booking. Times are in PST.",
+            "description": "Get available time slots for booking. Times are in PST/PDT.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -229,7 +268,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "create_booking",
-            "description": "Create a new booking. Timezone is PST.",
+            "description": "Create a new booking. Timezone is PST/PDT.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -247,7 +286,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "get_bookings",
-            "description": "Get all bookings. Times shown in PST.",
+            "description": "Get all bookings. Always show the booking UID in your response so users can cancel/reschedule.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -261,11 +300,11 @@ tools = [
         "type": "function",
         "function": {
             "name": "cancel_booking",
-            "description": "Cancel a booking using its UID (not ID).",
+            "description": "Cancel a booking using its UID (string). First get bookings to find the UID.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "booking_uid": {"type": "string", "description": "The booking UID (string)"},
+                    "booking_uid": {"type": "string", "description": "The booking UID"},
                     "reason": {"type": "string"}
                 },
                 "required": ["booking_uid"]
@@ -276,11 +315,11 @@ tools = [
         "type": "function",
         "function": {
             "name": "reschedule_booking",
-            "description": "Reschedule a booking using its UID (not ID).",
+            "description": "Reschedule a booking using its UID (string). First get bookings to find the UID.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "booking_uid": {"type": "string", "description": "The booking UID (string)"},
+                    "booking_uid": {"type": "string", "description": "The booking UID"},
                     "new_start_time": {"type": "string", "description": "ISO format"},
                     "reason": {"type": "string"}
                 },
@@ -290,25 +329,21 @@ tools = [
     }
 ]
 
-# Extract the actual function schema list for the OpenAI call
-functions = [t["function"] for t in tools]
-
 
 def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: CalComAPI) -> str:
-    """Execute the called function and return results (serialized JSON string)."""
+    """Execute function calls"""
+    
     if function_name == "get_available_slots":
         date = arguments.get("date")
         event_type_id = arguments.get("event_type_id")
 
         if not event_type_id:
-            # pick first event type if available
             evt_resp = cal_api.get_event_types()
             if evt_resp.get("success") and evt_resp.get("event_types"):
                 event_type_id = evt_resp["event_types"][0].get("id")
             else:
-                return json.dumps({"success": False, "error": "No event types configured"})
+                return json.dumps({"success": False, "error": "No event types configured in Cal.com"})
 
-        # day range
         start_date = f"{date}T00:00:00Z"
         end_date = f"{date}T23:59:59Z"
         result = cal_api.get_available_slots(event_type_id, start_date, end_date)
@@ -320,7 +355,7 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
                 "success": True,
                 "available_slots": formatted_slots,
                 "raw_slots": slots[:10],
-                "message": f"Found {len(slots)} slots (PST)"
+                "message": f"Found {len(slots)} available slots for {date} (PST/PDT)"
             })
         return json.dumps(result)
 
@@ -358,42 +393,49 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
 
 
 def chat_with_assistant(messages: List[Dict[str, Any]], cal_api: CalComAPI) -> tuple:
-    """Send messages to OpenAI and handle function calling"""
-    # Use the newer client.chat.completions.create API
+    """Send messages to OpenAI using tools API"""
+    
     response = client.chat.completions.create(
-        model="gpt-4o-mini",  # pick a model you have access to
+        model="gpt-4o-mini",
         messages=messages,
-        functions=functions,
-        function_call="auto"
+        tools=tools,
+        tool_choice="auto"
     )
 
     assistant_message = response.choices[0].message
 
-    # If model issued a function call:
-    if getattr(assistant_message, "function_call", None):
-        function_name = assistant_message.function_call.name
-        function_args = json.loads(assistant_message.function_call.arguments or "{}")
+    # Check if tool calls were made
+    if assistant_message.tool_calls:
+        tool_call = assistant_message.tool_calls[0]
+        function_name = tool_call.function.name
+        function_args = json.loads(tool_call.function.arguments or "{}")
 
         # Execute the function
         function_response = execute_function(function_name, function_args, cal_api)
 
-        # Add assistant function call placeholder + function response
+        # Add assistant message with tool call
         messages.append({
             "role": "assistant",
-            "content": None,
-            "function_call": {
-                "name": function_name,
-                "arguments": assistant_message.function_call.arguments
-            }
+            "content": assistant_message.content,
+            "tool_calls": [{
+                "id": tool_call.id,
+                "type": "function",
+                "function": {
+                    "name": function_name,
+                    "arguments": tool_call.function.arguments
+                }
+            }]
         })
 
+        # Add tool response
         messages.append({
-            "role": "function",
+            "role": "tool",
+            "tool_call_id": tool_call.id,
             "name": function_name,
             "content": function_response
         })
 
-        # Ask model to compose a final reply
+        # Get final response
         second_response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages
@@ -409,10 +451,9 @@ def chat_with_assistant(messages: List[Dict[str, Any]], cal_api: CalComAPI) -> t
 def main():
     st.set_page_config(page_title="Cal.com Chatbot", page_icon="📅", layout="wide")
 
-    st.title("📅 Cal.com Meeting Assistant")
+    st.title("📅 Cal.com Meeting Assistant (PST/PDT)")
     st.markdown("Book, view, cancel, and reschedule your meetings through natural conversation!")
 
-    # Sidebar for configuration
     with st.sidebar:
         st.header("⚙️ Configuration")
 
@@ -423,67 +464,89 @@ def main():
             help="Enter your Cal.com API key"
         )
 
-        user_email = st.text_input("Your Email", placeholder="user@example.com", help="Your email for booking management")
+        user_email = st.text_input(
+            "Your Email", 
+            placeholder="user@example.com", 
+            help="Your email for booking management"
+        )
+
+        st.info("🕐 All times shown in PST/PDT")
 
         st.markdown("---")
         st.markdown("### 💡 Try saying:")
-        st.markdown("- Help me book a meeting")
+        st.markdown("- Help me book a meeting for tomorrow at 2pm")
         st.markdown("- Show me my scheduled events")
-        st.markdown("- Cancel my meeting at 3pm today")
-        st.markdown("- Reschedule my 2pm meeting to 4pm")
+        st.markdown("- Cancel my meeting")
+        st.markdown("- Reschedule my meeting to 4pm")
 
         if st.button("Clear Chat History"):
             st.session_state.messages = []
             st.rerun()
 
+        st.markdown("---")
+        st.markdown("### 🔍 Debug Info")
+
     # Initialize session state
-    if "messages" not in st.session_state or not st.session_state.messages:
+    if "messages" not in st.session_state:
         st.session_state.messages = [{
             "role": "system",
-            "content": (
-                "You are a helpful meeting assistant that helps users manage their Cal.com calendar. "
-                "You can help them book meetings, view scheduled events, cancel bookings, and reschedule meetings.\n\n"
-                "When booking meetings, always ask for: date/time, email (if not provided), name, and reason. "
-                "Always check for available slots before booking. When showing bookings, format them clearly "
-                "with date and time. For cancellations, confirm the specific booking before cancelling. Be friendly."
-            )
+            "content": f"""You are a helpful meeting assistant for Cal.com calendar management.
+            
+IMPORTANT: All times are in PST/PDT timezone (America/Los_Angeles).
+
+When booking:
+1. Ask for date/time, email (default: {user_email}), name, and reason
+2. Always check available slots first
+3. Confirm the booking details
+
+When listing bookings:
+- ALWAYS show the booking UID for each meeting
+- Format: "Meeting at [time] (UID: [uid])"
+- This lets users cancel/reschedule
+
+For cancel/reschedule:
+1. First call get_bookings to get UIDs
+2. Show user their bookings with UIDs
+3. Use the UID (not ID) for the operation
+
+Be conversational and helpful!"""
         }]
 
     if not calcom_key:
-        st.warning("⚠️ Please enter your Cal.com API key in the sidebar to get started.")
+        st.warning("⚠️ Please enter your Cal.com API key in the sidebar.")
         return
 
     cal_api = CalComAPI(calcom_key)
 
     # Display chat messages
     for message in st.session_state.messages:
-        role = message.get("role")
-        content = message.get("content")
-        # Skip None content (function-call placeholders)
-        if content:
-            with st.chat_message(role):
-                st.markdown(content)
+        if message.get("role") in ["user", "assistant"] and message.get("content"):
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
 
     # Chat input
     if prompt := st.chat_input("Ask me about your meetings..."):
-        # Add user message
         st.session_state.messages.append({"role": "user", "content": prompt})
 
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Get assistant response
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 working_messages = st.session_state.messages.copy()
-                # Inject user email into the conversation context if provided
-                if user_email and "The user's email is:" not in working_messages[0]["content"]:
-                    working_messages[0]["content"] += f"\n\nThe user's email is: {user_email}"
+                if user_email and "default:" not in working_messages[0]["content"]:
+                    working_messages[0]["content"] = working_messages[0]["content"].replace(
+                        f"default: {user_email}", 
+                        f"default: {user_email}"
+                    )
 
-                response_text, updated_messages = chat_with_assistant(working_messages, cal_api)
-                st.markdown(response_text or "*No response from assistant.*")
+                try:
+                    response_text, _ = chat_with_assistant(working_messages, cal_api)
+                    st.markdown(response_text or "No response")
+                except Exception as e:
+                    response_text = f"Error: {str(e)}"
+                    st.error(response_text)
 
-        # Add assistant response to history
         st.session_state.messages.append({"role": "assistant", "content": response_text})
         st.rerun()
 
