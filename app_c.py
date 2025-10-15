@@ -51,20 +51,21 @@ class CalComAPI:
     def get_event_types(self) -> Dict[str, Any]:
         """Get available event types"""
         try:
-            response = requests.get(f"https://api.cal.com/v2/event-types?apiKey={self.api_key}",
+            response = requests.get(
+                f"https://api.cal.com/v2/event-types?apiKey={self.api_key}",
                 headers={
-                "Content-Type": "application/json",
-                "cal-api-version": "2024-06-14"  # optional, you can keep your version
+                    "Content-Type": "application/json",
+                    "cal-api-version": "2024-06-14"
                 },
-                timeout=10)
+                timeout=10
+            )
             response.raise_for_status()
             data = response.json()
             event_types = data.get("data", [])
 
             if event_types:
                 st.sidebar.success(f"✅ Found {len(event_types)} event types")
-                # Show event type details for debugging
-                for et in event_types[:3]:  # Show first 3
+                for et in event_types[:3]:
                     st.sidebar.info(f"Event Type: {et.get('title')} (ID: {et.get('id')})")
             else:
                 st.sidebar.warning("⚠️ No event types found. Configure them in Cal.com first.")
@@ -81,38 +82,65 @@ class CalComAPI:
         """Get available time slots"""
         try:
             st.sidebar.info(f"🔍 Checking slots for event type {event_type_id}")
+            st.sidebar.info(f"Date range: {start_date} to {end_date}")
+            
             response = requests.get(
                 "https://api.cal.com/v2/slots",
-                headers={"Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "cal-api-version": "2024-09-04",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                    "cal-api-version": "2024-09-04",
                 },
                 params={
-                "eventTypeId": event_type_id,
-                "start": start_date,
-                "end": end_date,
+                    "eventTypeId": event_type_id,
+                    "startTime": start_date,
+                    "endTime": end_date,
                 },
                 timeout=10
             )
             response.raise_for_status()
             data = response.json()
             
-            slots_container = data.get("data", {})
+            st.sidebar.info(f"Raw API response: {json.dumps(data, indent=2)[:500]}")
+            
+            # Parse slots from response
             slots = []
-            if isinstance(slots_container, dict):
-                inner = slots_container.get("slots", {})
-                for date_key, times in inner.items():
-                    if isinstance(times, list):
-                        slots.extend(times)
-            elif isinstance(slots_container, list):
-                slots = slots_container
+            slots_data = data.get("data", {})
+            
+            # Handle different response structures
+            if isinstance(slots_data, dict):
+                # Check for 'slots' key with date-keyed structure
+                inner_slots = slots_data.get("slots", {})
+                if isinstance(inner_slots, dict):
+                    for date_key, time_list in inner_slots.items():
+                        if isinstance(time_list, list):
+                            for slot in time_list:
+                                # Slot might be a string or object with 'time' property
+                                if isinstance(slot, str):
+                                    slots.append(slot)
+                                elif isinstance(slot, dict) and "time" in slot:
+                                    slots.append(slot["time"])
+                                else:
+                                    slots.append(slot)
+                elif isinstance(inner_slots, list):
+                    slots = inner_slots
+            elif isinstance(slots_data, list):
+                slots = slots_data
 
-            st.sidebar.info(f"📅 Found {len(slots)} available slots")
-            return {"success": True, "slots": slots, "count": len(slots)}
+            st.sidebar.success(f"📅 Found {len(slots)} available slots")
+            if slots:
+                st.sidebar.info(f"First slot example: {slots[0]}")
+            
+            return {
+                "success": True, 
+                "slots": slots, 
+                "count": len(slots),
+                "event_type_id": event_type_id  # Pass this along for booking
+            }
         except requests.exceptions.RequestException as e:
             error_msg = str(e)
             if hasattr(e, "response") and e.response is not None:
-                error_msg += f" | {e.response.text}"
+                error_msg += f" | Response: {e.response.text}"
             st.sidebar.error(f"❌ Slot check failed: {error_msg}")
             return {"success": False, "error": error_msg, "slots": []}
 
@@ -197,7 +225,6 @@ class CalComAPI:
             for booking in bookings:
                 if "start" in booking:
                     booking["start_pst"] = format_time_pst(booking["start"])
-                # Make sure UID is visible
                 booking["display_uid"] = booking.get("uid", "N/A")
 
             st.sidebar.success(f"✅ Found {len(bookings)} bookings")
@@ -265,12 +292,12 @@ tools = [
         "type": "function",
         "function": {
             "name": "get_available_slots",
-            "description": "Get available time slots for booking. Times are in PST/PDT.",
+            "description": "Get available time slots for booking. Times are in PST/PDT. Always call this before booking.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "date": {"type": "string", "description": "Date in YYYY-MM-DD format"},
-                    "event_type_id": {"type": "integer", "description": "Event type ID (optional)"}
+                    "event_type_id": {"type": "integer", "description": "Event type ID (optional, will use first available if not provided)"}
                 },
                 "required": ["date"]
             }
@@ -280,17 +307,17 @@ tools = [
         "type": "function",
         "function": {
             "name": "create_booking",
-            "description": "Create a new booking. Timezone is PST/PDT.",
+            "description": "Create a new booking. Must call get_available_slots first to get valid times and event_type_id.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "event_type_id": {"type": "integer"},
-                    "start_time": {"type": "string", "description": "ISO format (YYYY-MM-DDTHH:MM:SSZ)"},
+                    "event_type_id": {"type": "integer", "description": "Event type ID from get_available_slots"},
+                    "start_time": {"type": "string", "description": "ISO format timestamp from available slots (YYYY-MM-DDTHH:MM:SSZ)"},
                     "attendee_email": {"type": "string"},
                     "attendee_name": {"type": "string"},
                     "meeting_reason": {"type": "string"}
                 },
-                "required": ["start_time", "attendee_email", "attendee_name"]
+                "required": ["event_type_id", "start_time", "attendee_email", "attendee_name"]
             }
         }
     },
@@ -298,13 +325,13 @@ tools = [
         "type": "function",
         "function": {
             "name": "get_bookings",
-            "description": "Get all bookings. Always show the booking UID in your response so users can cancel/reschedule.",
+            "description": "Get all bookings. Always show the booking UID in your response.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "attendee_email": {"type": "string"}
                 },
-                "required": ["attendee_email"]
+                "required": []
             }
         }
     },
@@ -349,12 +376,14 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
         date = arguments.get("date")
         event_type_id = arguments.get("event_type_id")
 
+        # Get event type if not provided
         if not event_type_id:
             evt_resp = cal_api.get_event_types()
             if evt_resp.get("success") and evt_resp.get("event_types"):
                 event_type_id = evt_resp["event_types"][0].get("id")
+                st.sidebar.info(f"Using event type ID: {event_type_id}")
             else:
-                return json.dumps({"success": False, "error": "No event types configured in Cal.com"})
+                return json.dumps({"success": False, "error": "No event types configured in Cal.com. Please create an event type first."})
 
         start_date = f"{date}T00:00:00Z"
         end_date = f"{date}T23:59:59Z"
@@ -367,12 +396,15 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
                 "success": True,
                 "available_slots": formatted_slots,
                 "raw_slots": slots[:10],
+                "event_type_id": event_type_id,  # Return this for booking
                 "message": f"Found {len(slots)} available slots for {date} (PST/PDT)"
             })
         return json.dumps(result)
 
     elif function_name == "create_booking":
         event_type_id = arguments.get("event_type_id")
+        
+        # Get event type if not provided
         if not event_type_id:
             evt_resp = cal_api.get_event_types()
             if evt_resp.get("success") and evt_resp.get("event_types"):
@@ -515,19 +547,20 @@ def main():
 IMPORTANT: All times are in PST/PDT timezone (America/Los_Angeles).
 
 When booking:
-1. Ask for date/time, email (default: {user_email}), name, and reason
-2. Always check available slots first
-3. Confirm the booking details
+1. ALWAYS call get_available_slots first to check availability
+2. Use the event_type_id and raw_slots returned from get_available_slots
+3. Ask user which time slot they prefer if multiple are available
+4. Use exact timestamp from raw_slots when calling create_booking
+5. Require: email (default: {user_email if user_email else 'ask user'}), name, and reason
 
 When listing bookings:
 - ALWAYS show the booking UID for each meeting
 - Format: "Meeting at [time] (UID: [uid])"
-- This lets users cancel/reschedule
 
 For cancel/reschedule:
 1. First call get_bookings to get UIDs
 2. Show user their bookings with UIDs
-3. Use the UID (not ID) for the operation
+3. Use the UID for the operation
 
 Be conversational and helpful!"""
         }]
@@ -554,9 +587,11 @@ Be conversational and helpful!"""
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 working_messages = st.session_state.messages.copy()
-                if user_email and "default:" not in working_messages[0]["content"]:
+                
+                # Update system message with user email if provided
+                if user_email and working_messages[0]["role"] == "system":
                     working_messages[0]["content"] = working_messages[0]["content"].replace(
-                        f"default: {user_email}", 
+                        f"default: {user_email if user_email else 'ask user'}", 
                         f"default: {user_email}"
                     )
 
@@ -566,10 +601,4 @@ Be conversational and helpful!"""
                 except Exception as e:
                     response_text = f"Error: {str(e)}"
                     st.error(response_text)
-
-        st.session_state.messages.append({"role": "assistant", "content": response_text})
-        st.rerun()
-
-
-if __name__ == "__main__":
-    main()
+                    st.sidebar.error(f"Exception details: {str(e)}
