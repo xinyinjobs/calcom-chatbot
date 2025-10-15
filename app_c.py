@@ -223,6 +223,7 @@ class CalComAPI:
         attendee_email: str,
         attendee_name: str,
         attendee_timezone: str = "America/Los_Angeles",
+        attendee_language: str = "en",
         meeting_reason: str = ""
     ) -> Dict[str, Any]:
         """Create a new booking"""
@@ -233,7 +234,8 @@ class CalComAPI:
                 "attendee": {
                     "name": attendee_name,
                     "email": attendee_email,
-                    "timeZone": attendee_timezone
+                    "timeZone": attendee_timezone,
+                    "language": attendee_language
                 }
             }
 
@@ -242,6 +244,7 @@ class CalComAPI:
 
             st.sidebar.info("📤 Creating booking...")
             st.sidebar.code(json.dumps(payload, indent=2), language="json")
+            st.sidebar.info(f"🌍 Timezone: {attendee_timezone} (PDT) | 🗣️ Language: {attendee_language}")
 
             response = requests.post(
                 f"https://api.cal.com/v1/bookings?apiKey={self.api_key}", 
@@ -363,6 +366,18 @@ tools = [
     {
         "type": "function",
         "function": {
+            "name": "get_event_types",
+            "description": "Get all available event types to show user their options. Use this when user's meeting reason doesn't match any event type.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_available_slots",
             "description": "Get available time slots for booking. Times are in PST/PDT. Always call this before booking.",
             "parameters": {
@@ -398,17 +413,17 @@ tools = [
         "type": "function",
         "function": {
             "name": "create_booking",
-            "description": "Create a new booking. Must call get_available_slots first to get valid times and event_type_id.",
+            "description": "Create a new booking. IMPORTANT: First check if meeting_reason matches an event type title. If it matches, use that event_type_id. If no match, call get_event_types and ask user to choose.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "event_type_id": {"type": "integer", "description": "Event type ID from get_available_slots"},
+                    "event_type_id": {"type": "integer", "description": "Event type ID from get_available_slots or matched from meeting_reason"},
                     "start_time": {"type": "string", "description": "ISO format timestamp from available slots (YYYY-MM-DDTHH:MM:SSZ)"},
                     "attendee_email": {"type": "string"},
                     "attendee_name": {"type": "string"},
-                    "meeting_reason": {"type": "string"}
+                    "meeting_reason": {"type": "string", "description": "Meeting reason - will be matched against event type titles"}
                 },
-                "required": ["event_type_id", "start_time", "attendee_email", "attendee_name"]
+                "required": ["start_time", "attendee_email", "attendee_name"]
             }
         }
     },
@@ -463,7 +478,43 @@ tools = [
 def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: CalComAPI) -> str:
     """Execute function calls"""
     
-    if function_name == "get_available_slots":
+    if function_name == "get_event_types":
+        """Return all available event types for user to choose"""
+        evt_resp = cal_api.get_event_types()
+        
+        if not evt_resp.get("success"):
+            return json.dumps({
+                "success": False,
+                "error": f"Failed to fetch event types: {evt_resp.get('error')}"
+            })
+        
+        event_types = evt_resp.get("event_types", [])
+        if not event_types:
+            return json.dumps({
+                "success": False,
+                "error": "No event types configured",
+                "message": "Please create event types at https://app.cal.com/event-types"
+            })
+        
+        # Format event types for user
+        formatted_types = []
+        for et in event_types:
+            formatted_types.append({
+                "id": et.get("id"),
+                "title": et.get("title") or et.get("name"),
+                "slug": et.get("slug", ""),
+                "length": et.get("length", "N/A"),
+                "description": et.get("description", "")
+            })
+        
+        return json.dumps({
+            "success": True,
+            "event_types": formatted_types,
+            "count": len(formatted_types),
+            "message": f"Found {len(formatted_types)} available event types"
+        })
+    
+    elif function_name == "get_available_slots":
         date = arguments.get("date")
         event_type_id = arguments.get("event_type_id")
 
@@ -581,7 +632,8 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
                 start_time=start_time,
                 attendee_email=arguments["attendee_email"],
                 attendee_name=arguments["attendee_name"],
-                attendee_timezone="America/Los_Angeles",
+                attendee_timezone="America/Los_Angeles",  # PDT timezone
+                attendee_language="en",  # English
                 meeting_reason=arguments.get("meeting_reason", "")
             )
             return json.dumps(result)
@@ -590,15 +642,16 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
 
     elif function_name == "create_booking":
         event_type_id = arguments.get("event_type_id")
+        meeting_reason = arguments.get("meeting_reason", "")
         
         # Check for manual override
         if not event_type_id and 'manual_event_id' in st.session_state:
             event_type_id = st.session_state.manual_event_id
             st.sidebar.success(f"🎯 Using manually specified event type ID: {event_type_id}")
         
-        # Get event type if not provided
+        # Try to match meeting reason with event type title
         if not event_type_id:
-            st.sidebar.info("🔍 Fetching event types for booking...")
+            st.sidebar.info("🔍 Fetching event types to match with meeting reason...")
             evt_resp = cal_api.get_event_types()
             
             if not evt_resp.get("success"):
@@ -616,22 +669,56 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
                     "user_message": "Can't auto-detect event types. Please enter your event type ID manually in the sidebar."
                 })
             
-            # Try to find interview event type
-            interview_et = next((et for et in event_types if 'interview' in str(et.get('slug', '')).lower()), None)
-            if interview_et:
-                event_type_id = interview_et.get("id")
-                st.sidebar.success(f"🎯 Found interview event type: {interview_et.get('title')} (ID: {event_type_id})")
+            # Try to match meeting_reason with event type title
+            matched_et = None
+            if meeting_reason:
+                reason_lower = meeting_reason.lower().strip()
+                st.sidebar.info(f"🔍 Looking for event type matching: '{meeting_reason}'")
+                
+                for et in event_types:
+                    title = (et.get("title") or et.get("name") or "").lower().strip()
+                    slug = (et.get("slug") or "").lower().strip()
+                    
+                    # Check for exact or partial match
+                    if (reason_lower == title or 
+                        reason_lower == slug or 
+                        reason_lower in title or 
+                        title in reason_lower):
+                        matched_et = et
+                        st.sidebar.success(f"✅ Matched '{meeting_reason}' with event type: {et.get('title')} (ID: {et.get('id')})")
+                        break
+            
+            if matched_et:
+                event_type_id = matched_et.get("id")
             else:
-                event_type_id = event_types[0].get("id")
-                st.sidebar.success(f"✅ Using event type: {event_types[0].get('title')} (ID: {event_type_id})")
+                # No match found - return available event types for user to choose
+                st.sidebar.warning(f"⚠️ No event type matches '{meeting_reason}'")
+                
+                formatted_types = []
+                for et in event_types:
+                    formatted_types.append({
+                        "id": et.get("id"),
+                        "title": et.get("title") or et.get("name"),
+                        "slug": et.get("slug"),
+                        "length": f"{et.get('length', 'N/A')} min"
+                    })
+                
+                return json.dumps({
+                    "success": False,
+                    "error": "no_matching_event_type",
+                    "available_event_types": formatted_types,
+                    "user_message": f"I couldn't find an event type matching '{meeting_reason}'. Here are your available event types. Please specify which one you'd like to book.",
+                    "action_required": "user_must_choose_event_type"
+                })
 
         result = cal_api.create_booking(
             event_type_id=event_type_id,
             start_time=arguments["start_time"],
             attendee_email=arguments["attendee_email"],
             attendee_name=arguments["attendee_name"],
-            attendee_timezone="America/Los_Angeles",
-            meeting_reason=arguments.get("meeting_reason", "")
+            attendee_timezone="America/Los_Angeles",  # PDT timezone
+            attendee_language="en",  # English
+            meeting_reason=meeting_reason
         )
         return json.dumps(result)
 
@@ -759,6 +846,15 @@ def main():
         st.markdown("- Show me my scheduled events")
         st.markdown("- Cancel my meeting")
         st.markdown("- Reschedule my meeting to 4pm")
+        
+        if user_email:
+            st.markdown("---")
+            st.markdown("### 🔗 Quick Links")
+            if 'manual_event_id' in st.session_state:
+                event_id = st.session_state.manual_event_id
+                st.markdown(f"[📅 Check Availability](https://cal.com/event-types/{event_id})")
+            st.markdown("[⚙️ Manage Event Types](https://app.cal.com/event-types)")
+            st.markdown("[🔑 API Keys](https://app.cal.com/settings/developer/api-keys)")
 
         if st.button("Clear Chat History"):
             st.session_state.messages = []
@@ -781,8 +877,18 @@ def main():
                         st.success(f"✅ Successfully found {len(event_types)} event types!")
                         
                         # Show all event types in detail
-                        for et in event_types:
+                        for i, et in enumerate(event_types):
+                            st.write(f"**Event Type #{i+1}**")
                             st.json(et)
+                            
+                            # Generate availability link
+                            et_id = et.get('id')
+                            et_slug = et.get('slug', '')
+                            if et_id:
+                                st.markdown(f"🔗 [Check Availability for this Event Type](https://cal.com/event-types/{et_id})")
+                            if et_slug:
+                                st.info(f"Public booking link: https://cal.com/{et_slug}")
+                            st.markdown("---")
                             
                         # Check for "interview" event type
                         interview_et = next((et for et in event_types if 'interview' in str(et.get('slug', '')).lower() or 'interview' in str(et.get('title', '')).lower()), None)
@@ -809,10 +915,14 @@ def main():
 IMPORTANT: All times are in PST/PDT timezone (America/Los_Angeles).
 
 When booking:
-1. FIRST try get_available_slots to check availability
-2. If get_available_slots fails or returns an error, use create_booking_manual instead
-3. For create_booking_manual: convert user's PST time (e.g., "2pm" = "14:00") to 24-hour format
-4. Require: email (default: {user_email if user_email else 'ask user'}), name, and reason
+1. Get meeting reason from user (e.g., "interview", "consultation")
+2. FIRST try get_available_slots to check availability
+3. When create_booking is called:
+   - If meeting_reason matches an event type title, that event type will be used automatically
+   - If NO match, you'll receive a list of available event types - SHOW these to the user and ask them to choose
+   - Once user chooses, call create_booking again with the specific event_type_id
+4. If get_available_slots fails, use create_booking_manual
+5. Always use PDT timezone and English language (automatically set)
 
 When listing bookings:
 - ALWAYS show the booking UID for each meeting
@@ -823,7 +933,11 @@ For cancel/reschedule:
 2. Show user their bookings with UIDs
 3. Use the UID for the operation
 
-If slots API fails, explain to the user that you'll try to book directly at their requested time.
+If no event type matches user's reason, present the available options clearly:
+"I found these event types available:
+1. [Title] - [Length] 
+2. [Title] - [Length]
+Which one would you like to book?"
 
 Be conversational and helpful!"""
         }]
