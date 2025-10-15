@@ -1,6 +1,14 @@
 import os
 import json
 from datetime import datetime, timedelta
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+except Exception:  # pragma: no cover - fallback for older Pythons
+    ZoneInfo = None  # type: ignore
+try:
+    from pytz import timezone as pytz_timezone  # fallback
+except Exception:  # pragma: no cover
+    pytz_timezone = None  # type: ignore
 from typing import Optional, List, Dict, Any
 import requests
 from openai import OpenAI
@@ -27,14 +35,30 @@ if not OPENAI_API_KEY:
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Timezone utilities
+def _get_tz(name: str):
+    if ZoneInfo is not None:
+        return ZoneInfo(name)
+    if pytz_timezone is not None:
+        return pytz_timezone(name)
+    raise RuntimeError("No timezone implementation available. Install Python 3.9+ or pytz.")
+
+
+def _localize_naive(dt_naive: datetime, tz) -> datetime:
+    # pytz requires localize(); zoneinfo uses tzinfo assignment
+    if hasattr(tz, "localize"):
+        return tz.localize(dt_naive)  # type: ignore[attr-defined]
+    return dt_naive.replace(tzinfo=tz)
+
+
 def format_time_pst(iso_time: str) -> str:
-    """Convert ISO time to readable PST format"""
+    """Convert ISO time to readable America/Los_Angeles local time (PST/PDT)."""
     try:
-        dt = datetime.fromisoformat(iso_time.replace("Z", "+00:00"))
-        pst_offset = timedelta(hours=-8)
-        pst_time = dt + pst_offset
-        return pst_time.strftime("%Y-%m-%d %I:%M %p PST")
-    except:
+        dt_utc = datetime.fromisoformat(iso_time.replace("Z", "+00:00"))
+        la = _get_tz("America/Los_Angeles")
+        dt_la = dt_utc.astimezone(la)
+        tz_abbr = dt_la.tzname() or "PT"
+        return dt_la.strftime(f"%Y-%m-%d %I:%M %p {tz_abbr}")
+    except Exception:
         return iso_time
 
 
@@ -111,7 +135,7 @@ class CalComAPI:
             return {"success": False, "error": error_msg, "event_types": []}
 
     def get_available_slots(self, event_type_id: Any, start_date: str, end_date: str) -> Dict[str, Any]:
-        """Get available time slots"""
+        """Get available time slots. start_date/end_date must be ISO UTC strings (Z)."""
         try:
             st.sidebar.info(f"🔍 Checking slots for event type {event_type_id}")
             st.sidebar.info(f"Date range: {start_date} to {end_date}")
@@ -129,6 +153,8 @@ class CalComAPI:
                         "eventTypeId": event_type_id,
                         "startTime": start_date,
                         "endTime": end_date,
+                        # Ensure slots are computed for LA timezone
+                        "timeZone": "America/Los_Angeles",
                     },
                     timeout=10
                 )
@@ -142,6 +168,7 @@ class CalComAPI:
                         "eventTypeId": event_type_id,
                         "startTime": start_date,
                         "endTime": end_date,
+                        "timeZone": "America/Los_Angeles",
                     },
                     timeout=10
                 )
@@ -153,39 +180,70 @@ class CalComAPI:
             st.sidebar.code(f"Raw response: {json.dumps(data, indent=2)[:1000]}", language="json")
             
             # Parse slots from response - handle multiple formats
-            slots = []
+            slots: List[str] = []
+
+            def maybe_add(value: Any):
+                # Accept ISO strings like 2025-10-16T22:00:00Z or with offset
+                if isinstance(value, str) and "T" in value:
+                    try:
+                        # Normalize to Z if offset is +00:00
+                        _ = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                        slots.append(value)
+                    except Exception:
+                        pass
+
+            def walk(obj: Any):
+                if isinstance(obj, dict):
+                    # Common keys we see in Cal.com API
+                    for key in ("time", "start", "startTime"):
+                        if key in obj:
+                            maybe_add(obj[key])
+                    # Continue walking nested structures
+                    for v in obj.values():
+                        walk(v)
+                elif isinstance(obj, list):
+                    for item in obj:
+                        walk(item)
+                else:
+                    maybe_add(obj)
             
             # Try different response structures
-            if "data" in data:
-                slots_data = data["data"]
-                
-                # Structure 1: {data: {slots: {"2024-10-16": ["time1", "time2"]}}}
-                if isinstance(slots_data, dict) and "slots" in slots_data:
-                    inner_slots = slots_data["slots"]
-                    if isinstance(inner_slots, dict):
-                        for date_key, time_list in inner_slots.items():
-                            if isinstance(time_list, list):
-                                for slot in time_list:
-                                    if isinstance(slot, str):
-                                        slots.append(slot)
-                                    elif isinstance(slot, dict) and "time" in slot:
-                                        slots.append(slot["time"])
-                    elif isinstance(inner_slots, list):
-                        slots = inner_slots
-                
-                # Structure 2: {data: ["time1", "time2"]}
-                elif isinstance(slots_data, list):
-                    slots = slots_data
-            
-            # Structure 3: {slots: [...]}
-            elif "slots" in data:
-                slots_data = data["slots"]
-                if isinstance(slots_data, dict):
-                    for date_key, time_list in slots_data.items():
-                        if isinstance(time_list, list):
-                            slots.extend(time_list)
-                elif isinstance(slots_data, list):
-                    slots = slots_data
+            if isinstance(data, dict):
+                # Try known shapes first
+                if "data" in data:
+                    slots_data = data["data"]
+                    if isinstance(slots_data, dict) and "slots" in slots_data:
+                        inner_slots = slots_data["slots"]
+                        if isinstance(inner_slots, dict):
+                            for _, time_list in inner_slots.items():
+                                if isinstance(time_list, list):
+                                    for slot in time_list:
+                                        if isinstance(slot, str):
+                                            slots.append(slot)
+                                        elif isinstance(slot, dict) and "time" in slot:
+                                            slots.append(slot["time"])
+                        elif isinstance(inner_slots, list):
+                            for item in inner_slots:
+                                if isinstance(item, str):
+                                    slots.append(item)
+                                elif isinstance(item, dict):
+                                    if "time" in item:
+                                        maybe_add(item["time"])
+                                    if "start" in item:
+                                        maybe_add(item["start"])
+                    elif isinstance(slots_data, list):
+                        for item in slots_data:
+                            if isinstance(item, str):
+                                slots.append(item)
+                            else:
+                                walk(item)
+                    else:
+                        walk(slots_data)
+                elif "slots" in data:
+                    walk(data["slots"])
+                else:
+                    # Fallback: walk entire response
+                    walk(data)
 
             st.sidebar.success(f"📅 Found {len(slots)} available slots")
             if slots:
@@ -553,8 +611,14 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
                 event_type_id = event_types[0].get("id")
                 st.sidebar.success(f"✅ Using first event type: {event_types[0].get('title')} (ID: {event_type_id})")
 
-        start_date = f"{date}T00:00:00Z"
-        end_date = f"{date}T23:59:59Z"
+        # Build an America/Los_Angeles local day window and convert to UTC
+        la = _get_tz("America/Los_Angeles")
+        utc = _get_tz("UTC")
+        local_start = _localize_naive(datetime.strptime(date, "%Y-%m-%d"), la)
+        local_end = (local_start + timedelta(days=1)) - timedelta(seconds=1)
+        start_date = local_start.astimezone(utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_date = local_end.astimezone(utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
         result = cal_api.get_available_slots(event_type_id, start_date, end_date)
 
         if result.get("success"):
@@ -578,7 +642,7 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
             })
 
     elif function_name == "create_booking_manual":
-        # Convert PST time to UTC for booking
+        # Convert America/Los_Angeles local time to UTC for booking
         date = arguments.get("date")
         time = arguments.get("time")  # Format: "14:00"
         
@@ -619,13 +683,14 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
                     event_type_id = event_types[0].get("id")
                     st.sidebar.success(f"✅ Using event type: {event_types[0].get('title')} (ID: {event_type_id})")
             
-            # Parse PST time
-            pst_datetime = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
-            # Add 8 hours to convert PST to UTC
-            utc_datetime = pst_datetime + timedelta(hours=8)
+            # Parse local LA time and convert to UTC (handles DST)
+            la = _get_tz("America/Los_Angeles")
+            utc = _get_tz("UTC")
+            local_dt = _localize_naive(datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M"), la)
+            utc_datetime = local_dt.astimezone(utc)
             start_time = utc_datetime.strftime("%Y-%m-%dT%H:%M:%SZ")
             
-            st.sidebar.info(f"Converting {date} {time} PST → {start_time} UTC")
+            st.sidebar.info(f"Converting {date} {time} America/Los_Angeles → {start_time} UTC")
             
             result = cal_api.create_booking(
                 event_type_id=event_type_id,
