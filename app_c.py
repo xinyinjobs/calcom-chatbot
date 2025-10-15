@@ -372,8 +372,16 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
         return json.dumps(result)
 
     elif function_name == "create_booking":
+        event_type_id = arguments.get("event_type_id")
+        if not event_type_id:
+            evt_resp = cal_api.get_event_types()
+            if evt_resp.get("success") and evt_resp.get("event_types"):
+                event_type_id = evt_resp["event_types"][0].get("id")
+            else:
+                return json.dumps({"success": False, "error": "No event types available"})
+
         result = cal_api.create_booking(
-            event_type_id=arguments.get("event_type_id", 1),
+            event_type_id=event_type_id,
             start_time=arguments["start_time"],
             attendee_email=arguments["attendee_email"],
             attendee_name=arguments["attendee_name"],
