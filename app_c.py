@@ -601,7 +601,7 @@ Be conversational and helpful!"""
                 except Exception as e:
                     response_text = f"Error: {str(e)}"
                     st.error(response_text)
-                    st.sidebar.error(f"Exception details: {str(e)})
+                    st.sidebar.error(f"Exception details: {str(e)}")
 
         st.session_state.messages.append({"role": "assistant", "content": response_text})
         st.rerun()
