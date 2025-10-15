@@ -81,19 +81,19 @@ class CalComAPI:
         """Get available time slots"""
         try:
             st.sidebar.info(f"🔍 Checking slots for event type {event_type_id}")
-           response = requests.get(
-                        "https://api.cal.com/v2/slots",
-                        headers={"Authorization": f"Bearer {calcom_key}",
-                            "Content-Type": "application/json",
-                            "cal-api-version": "2024-09-04",
-                            },
-                        params={
-                            "eventTypeId": event_type_id,
-                            "start": f"{tomorrow}",
-                            "end": f"{tomorrow}",
-                        },
-                        timeout=10
-                    )
+            response = requests.get(
+                "https://api.cal.com/v2/slots",
+                headers={"Authorization": f"Bearer {calcom_key}",
+                "Content-Type": "application/json",
+                "cal-api-version": "2024-09-04",
+                },
+                params={
+                "eventTypeId": event_type_id,
+                "start": f"{tomorrow}",
+                "end": f"{tomorrow}",
+                },
+                timeout=10
+            )
             response.raise_for_status()
             data = response.json()
             
