@@ -672,19 +672,24 @@ class CalComAPI:
             result = response.json()
             
             # Handle different response structures
-            booking_data = result.get("data", {})
-            if not booking_data and isinstance(result, dict):
-                # Sometimes the booking data is directly in the response
-                booking_data = result
+            try:
+                booking_data = result.get("data", {})
+                if not booking_data and isinstance(result, dict):
+                    # Sometimes the booking data is directly in the response
+                    booking_data = result
 
-                st.sidebar.success(f"✅ Booking created! ID: {booking_data.get('id')}, UID: {booking_data.get('uid')}")
-                return {
-                    "success": True, 
-                    "data": booking_data, 
-                    "booking_id": booking_data.get("id"), 
-                    "booking_uid": booking_data.get("uid"),
-                    "api_version": "v2" if "v2" in response.url else "v1"
-                }
+                    st.sidebar.success(f"✅ Booking created! ID: {booking_data.get('id')}, UID: {booking_data.get('uid')}")
+                    return {
+                        "success": True, 
+                        "data": booking_data, 
+                        "booking_id": booking_data.get("id"), 
+                        "booking_uid": booking_data.get("uid"),
+                        "api_version": "v2" if "v2" in response.url else "v1"
+                    }
+            except Exception as e:
+                st.sidebar.error(f"❌ Failed to handle booking response: {e}")
+                return {"success": False, "error": str(e)}
+
             finally:
                 # Always remove from processing set
                 if hasattr(self, '_processing_bookings') and booking_key in self._processing_bookings:
