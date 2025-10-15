@@ -549,6 +549,10 @@ class CalComAPI:
 
                 if meeting_reason:
                     payload["metadata"] = {"reason": meeting_reason}
+            
+            except Exception as e:
+                st.sidebar.error(f"❌ Failed to build booking payload: {str(e)}")
+                return {"success": False, "error": f"Payload construction failed: {str(e)}"}
 
             # Validate payload before sending
             validation = self.validate_booking_payload(payload)
