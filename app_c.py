@@ -240,7 +240,7 @@ class CalComAPI:
 
             st.sidebar.info(f"📤 Rescheduling UID: {booking_uid} to {new_start_time}")
             response = requests.patch(
-                f"{CALCOM_BASE_URL}/bookings/{booking_uid}", 
+                f"https://api.cal.com/v1/bookings/?{booking_uid}apiKey={api_key}",
                 headers=self.headers, 
                 json=payload, 
                 timeout=15
