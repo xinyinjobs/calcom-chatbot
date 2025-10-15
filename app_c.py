@@ -106,33 +106,95 @@ class CalComAPI:
             "cal-api-version": "2024-08-13"
         }
 
+    def validate_booking_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate booking payload before sending to API"""
+        errors = []
+        warnings = []
+        
+        # Check required fields
+        if not payload.get("eventTypeId"):
+            errors.append("eventTypeId is required")
+        elif not isinstance(payload["eventTypeId"], (int, str)):
+            errors.append("eventTypeId must be a number or string")
+            
+        if not payload.get("start"):
+            errors.append("start time is required")
+        else:
+            # Validate ISO format
+            try:
+                datetime.fromisoformat(payload["start"].replace("Z", "+00:00"))
+            except:
+                errors.append("start time must be in ISO format (YYYY-MM-DDTHH:MM:SSZ)")
+        
+        # Check attendee info
+        attendee = payload.get("attendee", {})
+        if not attendee.get("email"):
+            errors.append("attendee email is required")
+        elif "@" not in attendee["email"]:
+            errors.append("attendee email must be valid")
+            
+        if not attendee.get("name"):
+            errors.append("attendee name is required")
+            
+        # Check timezone
+        if attendee.get("timeZone") and attendee["timeZone"] not in ["America/Los_Angeles", "America/New_York", "UTC"]:
+            warnings.append(f"Timezone {attendee['timeZone']} might not be supported by Cal.com")
+        
+        return {
+            "valid": len(errors) == 0,
+            "errors": errors,
+            "warnings": warnings
+        }
+
     def get_event_types(self) -> Dict[str, Any]:
         """Get available event types"""
         try:
             st.sidebar.info("📤 Fetching event types...")
             
             # Try v2 API first with Bearer token
-            response = requests.get(
-                "https://api.cal.com/v2/event-types",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    "cal-api-version": "2024-08-13"
-                },
-                timeout=10
-            )
-            
-            st.sidebar.info(f"📥 Event types response status: {response.status_code}")
-            
-            # If v2 fails, try v1
-            if response.status_code >= 400:
-                st.sidebar.warning(f"V2 failed ({response.status_code}), trying V1 API...")
+            try:
+                st.sidebar.info("🔄 Trying Cal.com v2 API for event types...")
+                response = requests.get(
+                    "https://api.cal.com/v2/event-types",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "cal-api-version": "2024-08-13"
+                    },
+                    timeout=10
+                )
+                
+                st.sidebar.info(f"📥 V2 response status: {response.status_code}")
+                
+                if response.status_code >= 400:
+                    st.sidebar.warning(f"V2 failed ({response.status_code}): {response.text[:200]}")
+                    raise requests.exceptions.HTTPError(f"V2 API returned {response.status_code}")
+                    
+            except Exception as v2_error:
+                st.sidebar.warning(f"V2 API failed: {str(v2_error)}, trying V1 API...")
                 response = requests.get(
                     f"https://api.cal.com/v1/event-types?apiKey={self.api_key}",
                     headers={"Content-Type": "application/json"},
                     timeout=10
                 )
                 st.sidebar.info(f"📥 V1 response status: {response.status_code}")
+            
+            # Check for errors before processing
+            if response.status_code >= 400:
+                error_details = {
+                    "status_code": response.status_code,
+                    "response_text": response.text,
+                    "api_version": "v2" if "v2" in response.url else "v1"
+                }
+                st.sidebar.error(f"❌ Event types fetch failed with status {response.status_code}")
+                st.sidebar.code(json.dumps(error_details, indent=2), language="json")
+                
+                return {
+                    "success": False, 
+                    "error": f"Failed to fetch event types: {response.text}",
+                    "error_details": error_details,
+                    "event_types": []
+                }
             
             response.raise_for_status()
             data = response.json()
@@ -160,13 +222,27 @@ class CalComAPI:
             else:
                 st.sidebar.warning("⚠️ No event types found. Configure them in Cal.com first.")
 
-            return {"success": True, "event_types": event_types}
+            return {
+                "success": True, 
+                "event_types": event_types,
+                "api_version": "v2" if "v2" in response.url else "v1"
+            }
         except requests.exceptions.RequestException as e:
             error_msg = f"❌ Failed to fetch event types: {str(e)}"
+            error_details = {}
             if hasattr(e, "response") and e.response is not None:
-                error_msg += f"\n{e.response.text}"
+                error_details = {
+                    "status_code": e.response.status_code,
+                    "response_text": e.response.text
+                }
+                error_msg += f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
             st.sidebar.error(error_msg)
-            return {"success": False, "error": error_msg, "event_types": []}
+            return {
+                "success": False, 
+                "error": error_msg, 
+                "error_details": error_details,
+                "event_types": []
+            }
 
     def get_available_slots(self, event_type_id: Any, start_date: str, end_date: str) -> Dict[str, Any]:
         """Get available time slots. start_date/end_date must be ISO UTC strings (Z)."""
@@ -176,6 +252,7 @@ class CalComAPI:
             
             # Try v2 API first
             try:
+                st.sidebar.info("🔄 Trying Cal.com v2 API for slots...")
                 response = requests.get(
                     f"https://api.cal.com/v2/slots/available",
                     headers={
@@ -193,11 +270,19 @@ class CalComAPI:
                     timeout=10
                 )
                 st.sidebar.info(f"V2 API Status: {response.status_code}")
+                
+                if response.status_code >= 400:
+                    st.sidebar.warning(f"V2 API failed ({response.status_code}): {response.text[:200]}")
+                    raise requests.exceptions.HTTPError(f"V2 API returned {response.status_code}")
+                    
             except Exception as v2_error:
                 st.sidebar.warning(f"V2 API failed: {str(v2_error)}, trying v1...")
                 # Fallback to v1 API with query params
                 response = requests.get(
                     f"https://api.cal.com/v1/slots?apiKey={self.api_key}",
+                    headers={
+                        "Content-Type": "application/json"
+                    },
                     params={
                         "eventTypeId": event_type_id,
                         "startTime": start_date,
@@ -207,6 +292,26 @@ class CalComAPI:
                     timeout=10
                 )
                 st.sidebar.info(f"V1 API Status: {response.status_code}")
+            
+            # Check for errors before processing
+            if response.status_code >= 400:
+                error_details = {
+                    "status_code": response.status_code,
+                    "response_text": response.text,
+                    "event_type_id": event_type_id,
+                    "date_range": f"{start_date} to {end_date}",
+                    "api_version": "v2" if "v2" in response.url else "v1"
+                }
+                st.sidebar.error(f"❌ Slot check failed with status {response.status_code}")
+                st.sidebar.code(json.dumps(error_details, indent=2), language="json")
+                
+                return {
+                    "success": False, 
+                    "error": f"Failed to fetch slots: {response.text}",
+                    "error_details": error_details,
+                    "slots": [],
+                    "suggestion": "Check that your Cal.com event type has availability configured and the date is within your availability window"
+                }
             
             response.raise_for_status()
             data = response.json()
@@ -287,14 +392,20 @@ class CalComAPI:
                 "success": True, 
                 "slots": slots, 
                 "count": len(slots),
-                "event_type_id": event_type_id  # Pass this along for booking
+                "event_type_id": event_type_id,  # Pass this along for booking
+                "api_version": "v2" if "v2" in response.url else "v1"
             }
         except requests.exceptions.RequestException as e:
             error_msg = str(e)
-            error_details = ""
+            error_details = {}
             if hasattr(e, "response") and e.response is not None:
-                error_details = f"Status: {e.response.status_code} | Response: {e.response.text[:500]}"
-                error_msg += f" | {error_details}"
+                error_details = {
+                    "status_code": e.response.status_code,
+                    "response_text": e.response.text,
+                    "event_type_id": event_type_id,
+                    "date_range": f"{start_date} to {end_date}"
+                }
+                error_msg += f" | Status: {e.response.status_code} | Response: {e.response.text[:500]}"
             
             st.sidebar.error(f"❌ Slot check failed: {error_msg}")
             st.sidebar.warning("💡 Tip: Check that your Cal.com event type has availability configured")
@@ -334,39 +445,114 @@ class CalComAPI:
             if meeting_reason:
                 payload["metadata"] = {"reason": meeting_reason}
 
+            # Validate payload before sending
+            validation = self.validate_booking_payload(payload)
+            if not validation["valid"]:
+                error_msg = f"❌ Invalid booking payload: {', '.join(validation['errors'])}"
+                st.sidebar.error(error_msg)
+                return {"success": False, "error": error_msg, "validation_errors": validation["errors"]}
+            
+            if validation["warnings"]:
+                for warning in validation["warnings"]:
+                    st.sidebar.warning(f"⚠️ {warning}")
+
             st.sidebar.info("📤 Creating booking...")
             st.sidebar.code(json.dumps(payload, indent=2), language="json")
             st.sidebar.info(f"🌍 Timezone: {attendee_timezone} (PDT) | 🗣️ Language: {attendee_language}")
 
-            response = requests.post(
-                f"https://api.cal.com/v1/bookings?apiKey={self.api_key}", 
-                headers=self.headers, 
-                json=payload, 
-                timeout=15
-            )
+            # Try v2 API first with proper headers
+            try:
+                st.sidebar.info("🔄 Trying Cal.com v2 API...")
+                response = requests.post(
+                    f"https://api.cal.com/v2/bookings",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "cal-api-version": "2024-08-13"
+                    },
+                    json=payload,
+                    timeout=15
+                )
+                st.sidebar.info(f"📥 V2 Response: {response.status_code}")
+                
+                if response.status_code >= 400:
+                    st.sidebar.warning(f"V2 API failed ({response.status_code}): {response.text[:200]}")
+                    raise requests.exceptions.HTTPError(f"V2 API returned {response.status_code}")
+                    
+            except Exception as v2_error:
+                st.sidebar.warning(f"V2 API failed: {str(v2_error)}, trying v1...")
+                
+                # Fallback to v1 API with proper headers
+                response = requests.post(
+                    f"https://api.cal.com/v1/bookings?apiKey={self.api_key}",
+                    headers={
+                        "Content-Type": "application/json"
+                    },
+                    json=payload,
+                    timeout=15
+                )
+                st.sidebar.info(f"📥 V1 Response: {response.status_code}")
             
-            st.sidebar.info(f"📥 Response: {response.status_code}")
-            
+            # Detailed error logging
             if response.status_code >= 400:
-                st.sidebar.error(f"Error response: {response.text}")
+                error_details = {
+                    "status_code": response.status_code,
+                    "response_text": response.text,
+                    "request_payload": payload,
+                    "api_version": "v2" if "v2" in response.url else "v1"
+                }
+                st.sidebar.error(f"❌ Booking failed with status {response.status_code}")
+                st.sidebar.code(json.dumps(error_details, indent=2), language="json")
+                
+                # Try to parse error message from response
+                try:
+                    error_data = response.json()
+                    error_message = error_data.get("message", "Unknown error")
+                    if "data" in error_data and isinstance(error_data["data"], dict):
+                        error_message = error_data["data"].get("message", error_message)
+                except:
+                    error_message = response.text
+                
+                return {
+                    "success": False, 
+                    "error": f"Booking failed: {error_message}",
+                    "error_details": error_details,
+                    "status_code": response.status_code
+                }
             
             response.raise_for_status()
             result = response.json()
+            
+            # Handle different response structures
             booking_data = result.get("data", {})
+            if not booking_data and isinstance(result, dict):
+                # Sometimes the booking data is directly in the response
+                booking_data = result
 
             st.sidebar.success(f"✅ Booking created! ID: {booking_data.get('id')}, UID: {booking_data.get('uid')}")
             return {
                 "success": True, 
                 "data": booking_data, 
                 "booking_id": booking_data.get("id"), 
-                "booking_uid": booking_data.get("uid")
+                "booking_uid": booking_data.get("uid"),
+                "api_version": "v2" if "v2" in response.url else "v1"
             }
         except requests.exceptions.RequestException as e:
             error_msg = f"❌ Failed to create booking: {str(e)}"
+            error_details = {}
             if hasattr(e, "response") and e.response is not None:
+                error_details = {
+                    "status_code": e.response.status_code,
+                    "response_text": e.response.text,
+                    "request_payload": payload
+                }
                 error_msg += f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
             st.sidebar.error(error_msg)
-            return {"success": False, "error": error_msg}
+            return {
+                "success": False, 
+                "error": error_msg,
+                "error_details": error_details
+            }
 
     def get_bookings(self, attendee_email: Optional[str] = None) -> Dict[str, Any]:
         """Get all bookings"""
@@ -718,13 +904,23 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
                     st.sidebar.success(f"✅ Using event type: {event_types[0].get('title')} (ID: {event_type_id})")
             
             # Parse local LA time and convert to UTC (handles DST)
-            la = _get_tz("America/Los_Angeles")
-            utc = _get_tz("UTC")
-            local_dt = _localize_naive(datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M"), la)
-            utc_datetime = local_dt.astimezone(utc)
-            start_time = utc_datetime.strftime("%Y-%m-%dT%H:%M:%SZ")
-            
-            st.sidebar.info(f"Converting {date} {time} America/Los_Angeles → {start_time} UTC")
+            try:
+                la = _get_tz("America/Los_Angeles")
+                utc = _get_tz("UTC")
+                local_dt = _localize_naive(datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M"), la)
+                utc_datetime = local_dt.astimezone(utc)
+                start_time = utc_datetime.strftime("%Y-%m-%dT%H:%M:%SZ")
+                
+                st.sidebar.info(f"Converting {date} {time} America/Los_Angeles → {start_time} UTC")
+                
+                # Validate the converted time
+                if not start_time.endswith('Z'):
+                    raise ValueError("Converted time must end with Z")
+                    
+            except Exception as time_error:
+                error_msg = f"Failed to convert time: {str(time_error)}"
+                st.sidebar.error(f"❌ {error_msg}")
+                return json.dumps({"success": False, "error": error_msg})
             
             result = cal_api.create_booking(
                 event_type_id=event_type_id,
@@ -1037,6 +1233,79 @@ def main():
                 else:
                     st.error(f"❌ API call failed: {result.get('error')}")
                     st.warning("Check your API key permissions")
+        
+        # Add booking test button
+        if calcom_key and st.button("🧪 Test Booking Process"):
+            with st.spinner("Testing booking process..."):
+                test_api = CalComAPI(calcom_key)
+                
+                # Test with tomorrow's date
+                from datetime import datetime, timedelta
+                tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+                
+                st.write(f"**Testing booking process for {tomorrow}...**")
+                
+                # Test event types
+                st.write("1. Testing event types...")
+                evt_result = test_api.get_event_types()
+                if not evt_result.get("success"):
+                    st.error(f"❌ Event types failed: {evt_result.get('error')}")
+                    return
+                
+                event_types = evt_result.get("event_types", [])
+                if not event_types:
+                    st.error("❌ No event types found")
+                    return
+                
+                event_type_id = event_types[0].get("id")
+                st.success(f"✅ Found event type: {event_types[0].get('title')} (ID: {event_type_id})")
+                
+                # Test slots
+                st.write("2. Testing available slots...")
+                la = _get_tz("America/Los_Angeles")
+                utc = _get_tz("UTC")
+                local_start = _localize_naive(datetime.strptime(tomorrow, "%Y-%m-%d"), la)
+                local_end = (local_start + timedelta(days=1)) - timedelta(seconds=1)
+                start_date = local_start.astimezone(utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                end_date = local_end.astimezone(utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                
+                slots_result = test_api.get_available_slots(event_type_id, start_date, end_date)
+                if not slots_result.get("success"):
+                    st.error(f"❌ Slots check failed: {slots_result.get('error')}")
+                    st.json(slots_result.get('error_details', {}))
+                    return
+                
+                slots = slots_result.get("slots", [])
+                if not slots:
+                    st.warning("⚠️ No available slots found")
+                    return
+                
+                st.success(f"✅ Found {len(slots)} available slots")
+                
+                # Test booking validation
+                st.write("3. Testing booking validation...")
+                test_payload = {
+                    "eventTypeId": event_type_id,
+                    "start": slots[0],
+                    "attendee": {
+                        "name": "Test User",
+                        "email": "test@example.com",
+                        "timeZone": "America/Los_Angeles",
+                        "language": "en"
+                    }
+                }
+                
+                validation = test_api.validate_booking_payload(test_payload)
+                if validation["valid"]:
+                    st.success("✅ Booking payload validation passed")
+                    if validation["warnings"]:
+                        for warning in validation["warnings"]:
+                            st.warning(f"⚠️ {warning}")
+                else:
+                    st.error(f"❌ Booking payload validation failed: {validation['errors']}")
+                    return
+                
+                st.success("🎉 All booking tests passed! The booking system should work correctly.")
 
     # Initialize session state
     if "messages" not in st.session_state:
