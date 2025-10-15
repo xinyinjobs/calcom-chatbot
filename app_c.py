@@ -84,48 +84,76 @@ class CalComAPI:
             st.sidebar.info(f"🔍 Checking slots for event type {event_type_id}")
             st.sidebar.info(f"Date range: {start_date} to {end_date}")
             
-            response = requests.get(
-                "https://api.cal.com/v2/slots",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    "cal-api-version": "2024-09-04",
-                },
-                params={
-                    "eventTypeId": event_type_id,
-                    "startTime": start_date,
-                    "endTime": end_date,
-                },
-                timeout=10
-            )
+            # Try v2 API first
+            try:
+                response = requests.get(
+                    f"https://api.cal.com/v2/slots/available",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "cal-api-version": "2024-08-13",
+                    },
+                    params={
+                        "eventTypeId": event_type_id,
+                        "startTime": start_date,
+                        "endTime": end_date,
+                    },
+                    timeout=10
+                )
+                st.sidebar.info(f"V2 API Status: {response.status_code}")
+            except Exception as v2_error:
+                st.sidebar.warning(f"V2 API failed: {str(v2_error)}, trying v1...")
+                # Fallback to v1 API with query params
+                response = requests.get(
+                    f"https://api.cal.com/v1/slots?apiKey={self.api_key}",
+                    params={
+                        "eventTypeId": event_type_id,
+                        "startTime": start_date,
+                        "endTime": end_date,
+                    },
+                    timeout=10
+                )
+                st.sidebar.info(f"V1 API Status: {response.status_code}")
+            
             response.raise_for_status()
             data = response.json()
             
-            st.sidebar.info(f"Raw API response: {json.dumps(data, indent=2)[:500]}")
+            st.sidebar.code(f"Raw response: {json.dumps(data, indent=2)[:1000]}", language="json")
             
-            # Parse slots from response
+            # Parse slots from response - handle multiple formats
             slots = []
-            slots_data = data.get("data", {})
             
-            # Handle different response structures
-            if isinstance(slots_data, dict):
-                # Check for 'slots' key with date-keyed structure
-                inner_slots = slots_data.get("slots", {})
-                if isinstance(inner_slots, dict):
-                    for date_key, time_list in inner_slots.items():
+            # Try different response structures
+            if "data" in data:
+                slots_data = data["data"]
+                
+                # Structure 1: {data: {slots: {"2024-10-16": ["time1", "time2"]}}}
+                if isinstance(slots_data, dict) and "slots" in slots_data:
+                    inner_slots = slots_data["slots"]
+                    if isinstance(inner_slots, dict):
+                        for date_key, time_list in inner_slots.items():
+                            if isinstance(time_list, list):
+                                for slot in time_list:
+                                    if isinstance(slot, str):
+                                        slots.append(slot)
+                                    elif isinstance(slot, dict) and "time" in slot:
+                                        slots.append(slot["time"])
+                    elif isinstance(inner_slots, list):
+                        slots = inner_slots
+                
+                # Structure 2: {data: ["time1", "time2"]}
+                elif isinstance(slots_data, list):
+                    slots = slots_data
+            
+            # Structure 3: {slots: [...]}
+            elif "slots" in data:
+                slots_data = data["slots"]
+                if isinstance(slots_data, dict):
+                    for date_key, time_list in slots_data.items():
                         if isinstance(time_list, list):
-                            for slot in time_list:
-                                # Slot might be a string or object with 'time' property
-                                if isinstance(slot, str):
-                                    slots.append(slot)
-                                elif isinstance(slot, dict) and "time" in slot:
-                                    slots.append(slot["time"])
-                                else:
-                                    slots.append(slot)
-                elif isinstance(inner_slots, list):
-                    slots = inner_slots
-            elif isinstance(slots_data, list):
-                slots = slots_data
+                            slots.extend(time_list)
+                elif isinstance(slots_data, list):
+                    slots = slots_data
 
             st.sidebar.success(f"📅 Found {len(slots)} available slots")
             if slots:
@@ -139,10 +167,22 @@ class CalComAPI:
             }
         except requests.exceptions.RequestException as e:
             error_msg = str(e)
+            error_details = ""
             if hasattr(e, "response") and e.response is not None:
-                error_msg += f" | Response: {e.response.text}"
+                error_details = f"Status: {e.response.status_code} | Response: {e.response.text[:500]}"
+                error_msg += f" | {error_details}"
+            
             st.sidebar.error(f"❌ Slot check failed: {error_msg}")
-            return {"success": False, "error": error_msg, "slots": []}
+            st.sidebar.warning("💡 Tip: Check that your Cal.com event type has availability configured")
+            
+            # Return error with helpful message
+            return {
+                "success": False, 
+                "error": error_msg,
+                "error_details": error_details,
+                "slots": [],
+                "suggestion": "Make sure your Cal.com event type has availability hours set up and the date is within your availability window"
+            }
 
     def create_booking(
         self,
@@ -306,6 +346,25 @@ tools = [
     {
         "type": "function",
         "function": {
+            "name": "create_booking_manual",
+            "description": "Create a booking with manual time when slots API fails. Use this if get_available_slots returns an error.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event_type_id": {"type": "integer", "description": "Event type ID"},
+                    "date": {"type": "string", "description": "Date in YYYY-MM-DD format"},
+                    "time": {"type": "string", "description": "Time in HH:MM format (24-hour, PST)"},
+                    "attendee_email": {"type": "string"},
+                    "attendee_name": {"type": "string"},
+                    "meeting_reason": {"type": "string"}
+                },
+                "required": ["date", "time", "attendee_email", "attendee_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_booking",
             "description": "Create a new booking. Must call get_available_slots first to get valid times and event_type_id.",
             "parameters": {
@@ -396,10 +455,53 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
                 "success": True,
                 "available_slots": formatted_slots,
                 "raw_slots": slots[:10],
-                "event_type_id": event_type_id,  # Return this for booking
+                "event_type_id": event_type_id,
                 "message": f"Found {len(slots)} available slots for {date} (PST/PDT)"
             })
-        return json.dumps(result)
+        else:
+            # Return error but also suggest manual booking
+            return json.dumps({
+                "success": False,
+                "error": result.get("error"),
+                "event_type_id": event_type_id,
+                "message": "Could not fetch slots. You can try manual booking with create_booking_manual instead.",
+                "suggestion": result.get("suggestion", "")
+            })
+
+    elif function_name == "create_booking_manual":
+        # Convert PST time to UTC for booking
+        date = arguments.get("date")
+        time = arguments.get("time")  # Format: "14:00"
+        
+        try:
+            # Parse PST time
+            pst_datetime = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
+            # Add 8 hours to convert PST to UTC
+            utc_datetime = pst_datetime + timedelta(hours=8)
+            start_time = utc_datetime.strftime("%Y-%m-%dT%H:%M:%SZ")
+            
+            st.sidebar.info(f"Converting {date} {time} PST → {start_time} UTC")
+            
+            # Get event type
+            event_type_id = arguments.get("event_type_id")
+            if not event_type_id:
+                evt_resp = cal_api.get_event_types()
+                if evt_resp.get("success") and evt_resp.get("event_types"):
+                    event_type_id = evt_resp["event_types"][0].get("id")
+                else:
+                    return json.dumps({"success": False, "error": "No event types available"})
+            
+            result = cal_api.create_booking(
+                event_type_id=event_type_id,
+                start_time=start_time,
+                attendee_email=arguments["attendee_email"],
+                attendee_name=arguments["attendee_name"],
+                attendee_timezone="America/Los_Angeles",
+                meeting_reason=arguments.get("meeting_reason", "")
+            )
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"success": False, "error": f"Failed to parse time: {str(e)}"})
 
     elif function_name == "create_booking":
         event_type_id = arguments.get("event_type_id")
@@ -547,11 +649,10 @@ def main():
 IMPORTANT: All times are in PST/PDT timezone (America/Los_Angeles).
 
 When booking:
-1. ALWAYS call get_available_slots first to check availability
-2. Use the event_type_id and raw_slots returned from get_available_slots
-3. Ask user which time slot they prefer if multiple are available
-4. Use exact timestamp from raw_slots when calling create_booking
-5. Require: email (default: {user_email if user_email else 'ask user'}), name, and reason
+1. FIRST try get_available_slots to check availability
+2. If get_available_slots fails or returns an error, use create_booking_manual instead
+3. For create_booking_manual: convert user's PST time (e.g., "2pm" = "14:00") to 24-hour format
+4. Require: email (default: {user_email if user_email else 'ask user'}), name, and reason
 
 When listing bookings:
 - ALWAYS show the booking UID for each meeting
@@ -561,6 +662,8 @@ For cancel/reschedule:
 1. First call get_bookings to get UIDs
 2. Show user their bookings with UIDs
 3. Use the UID for the operation
+
+If slots API fails, explain to the user that you'll try to book directly at their requested time.
 
 Be conversational and helpful!"""
         }]
