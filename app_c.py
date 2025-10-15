@@ -265,7 +265,8 @@ class CalComAPI:
                 }
                 st.sidebar.error(f"❌ Event types fetch failed with status {response.status_code}")
                 st.sidebar.code(json.dumps(error_details, indent=2), language="json")
-                
+            else:
+                error_details = {}
             # Log the error
             self._log_error("get_event_types", f"API returned {response.status_code}", error_details)
             
