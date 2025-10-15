@@ -18,7 +18,11 @@ except:
     CALCOM_API_KEY = os.getenv("CALCOM_API_KEY", "")
 
 CALCOM_BASE_URL = "https://api.cal.com/v2"
-
+calcom_key = st.text_input(
+    "Enter your Cal.com API Key",
+    type="password",
+    help="Get it from https://cal.com/settings/developer/api-keys"
+) 
 # Validate OpenAI API key
 if not OPENAI_API_KEY:
     st.error("⚠️ OpenAI API key not configured.")
