@@ -51,7 +51,7 @@ class CalComAPI:
     def get_event_types(self) -> Dict[str, Any]:
         """Get available event types"""
         try:
-            response = requests.get(f"https://api.cal.com/v2/event-types?apiKey={api_key}",
+            response = requests.get(f"https://api.cal.com/v2/event-types?apiKey={self.api_key}",
                 headers={
                 "Content-Type": "application/json",
                 "cal-api-version": "2024-06-14"  # optional, you can keep your version
@@ -83,7 +83,7 @@ class CalComAPI:
             st.sidebar.info(f"🔍 Checking slots for event type {event_type_id}")
             response = requests.get(
                 "https://api.cal.com/v2/slots",
-                headers={"Authorization": f"Bearer {api_key}",
+                headers={"Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
                 "cal-api-version": "2024-09-04",
                 },
@@ -144,7 +144,7 @@ class CalComAPI:
             st.sidebar.code(json.dumps(payload, indent=2), language="json")
 
             response = requests.post(
-                f"https://api.cal.com/v1/bookings?apiKey={api_key}", 
+                f"https://api.cal.com/v1/bookings?apiKey={self.api_key}", 
                 headers=self.headers, 
                 json=payload, 
                 timeout=15
@@ -182,7 +182,7 @@ class CalComAPI:
 
             st.sidebar.info(f"📤 Fetching bookings: {params}")
             response = requests.get(
-                f"https://api.cal.com/v1/bookings/{booking_uid}?apiKey={api_key}", 
+                f"https://api.cal.com/v1/bookings/{booking_uid}?apiKey={self.api_key}", 
                 headers=self.headers, 
                 params=params, 
                 timeout=15
@@ -214,7 +214,7 @@ class CalComAPI:
         try:
             st.sidebar.info(f"📤 Cancelling UID: {booking_uid}")
             response = requests.delete(
-                f"https://api.cal.com/v1/bookings/{booking_uid}/cancel?apiKey=", 
+                f"https://api.cal.com/v1/bookings/{booking_uid}/cancel?apiKey={self.api_key}", 
                 headers=self.headers, 
                 json={"cancellationReason": reason}, 
                 timeout=15
@@ -240,7 +240,7 @@ class CalComAPI:
 
             st.sidebar.info(f"📤 Rescheduling UID: {booking_uid} to {new_start_time}")
             response = requests.patch(
-                f"https://api.cal.com/v1/bookings/?{booking_uid}apiKey={api_key}",
+                f"https://api.cal.com/v1/bookings/?{booking_uid}apiKey={self.api_key}",
                 headers=self.headers, 
                 json=payload, 
                 timeout=15
