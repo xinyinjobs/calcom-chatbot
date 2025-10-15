@@ -89,8 +89,8 @@ class CalComAPI:
                 },
                 params={
                 "eventTypeId": event_type_id,
-                "start": f"{tomorrow}",
-                "end": f"{tomorrow}",
+                "start": start_date,
+                "end": end_date,
                 },
                 timeout=10
             )
@@ -182,7 +182,7 @@ class CalComAPI:
 
             st.sidebar.info(f"📤 Fetching bookings: {params}")
             response = requests.get(
-                f"https://api.cal.com/v1/bookings/{booking_uid}?apiKey={self.api_key}", 
+                f"https://api.cal.com/v1/bookings?apiKey={self.api_key}",
                 headers=self.headers, 
                 params=params, 
                 timeout=15
@@ -240,7 +240,7 @@ class CalComAPI:
 
             st.sidebar.info(f"📤 Rescheduling UID: {booking_uid} to {new_start_time}")
             response = requests.patch(
-                f"https://api.cal.com/v1/bookings/?{booking_uid}apiKey={self.api_key}",
+                f"https://api.cal.com/v1/bookings/{booking_uid}?apiKey={self.api_key}",
                 headers=self.headers, 
                 json=payload, 
                 timeout=15
