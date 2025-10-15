@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from datetime import datetime, timedelta
 try:
     from zoneinfo import ZoneInfo  # Python 3.9+
@@ -105,6 +106,78 @@ class CalComAPI:
             "Content-Type": "application/json",
             "cal-api-version": "2024-08-13"
         }
+        self.request_cache = {}  # Simple cache to prevent duplicate requests
+        self.error_log = []  # Track errors for debugging
+    
+    def _log_error(self, operation: str, error: str, details: Dict[str, Any] = None):
+        """Log errors for debugging purposes"""
+        error_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "operation": operation,
+            "error": error,
+            "details": details or {}
+        }
+        self.error_log.append(error_entry)
+        
+        # Keep only last 50 errors to prevent memory issues
+        if len(self.error_log) > 50:
+            self.error_log = self.error_log[-50:]
+    
+    def get_error_log(self) -> List[Dict[str, Any]]:
+        """Get recent error log for debugging"""
+        return self.error_log[-10:]  # Return last 10 errors
+    
+    def _make_request_with_retry(self, method: str, url: str, max_retries: int = 3, 
+                                retry_delay: float = 1.0, **kwargs) -> requests.Response:
+        """Make HTTP request with exponential backoff retry logic"""
+        last_exception = None
+        
+        for attempt in range(max_retries):
+            try:
+                # Add cache key for GET requests to prevent duplicates
+                cache_key = None
+                if method.upper() == "GET":
+                    cache_key = f"{method}:{url}:{str(kwargs.get('params', {}))}"
+                    if cache_key in self.request_cache:
+                        cached_response, timestamp = self.request_cache[cache_key]
+                        # Use cache if less than 30 seconds old
+                        if time.time() - timestamp < 30:
+                            st.sidebar.info(f"🔄 Using cached response for {url}")
+                            return cached_response
+                
+                st.sidebar.info(f"🔄 Attempt {attempt + 1}/{max_retries} for {method} {url}")
+                
+                response = requests.request(method, url, **kwargs)
+                
+                # Cache successful GET responses
+                if cache_key and response.status_code < 400:
+                    self.request_cache[cache_key] = (response, time.time())
+                
+                # If successful or client error (4xx), return immediately
+                if response.status_code < 500:
+                    return response
+                    
+                # For server errors (5xx), retry
+                if attempt < max_retries - 1:
+                    delay = retry_delay * (2 ** attempt)  # Exponential backoff
+                    st.sidebar.warning(f"⚠️ Server error {response.status_code}, retrying in {delay}s...")
+                    time.sleep(delay)
+                else:
+                    return response
+                    
+            except requests.exceptions.RequestException as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    delay = retry_delay * (2 ** attempt)
+                    st.sidebar.warning(f"⚠️ Request failed: {str(e)}, retrying in {delay}s...")
+                    time.sleep(delay)
+                else:
+                    raise e
+        
+        # This should never be reached, but just in case
+        if last_exception:
+            raise last_exception
+        return response
 
     def validate_booking_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Validate booking payload before sending to API"""
@@ -151,17 +224,19 @@ class CalComAPI:
         try:
             st.sidebar.info("📤 Fetching event types...")
             
-            # Try v2 API first with Bearer token
+            # Try v2 API first with Bearer token and retry logic
             try:
                 st.sidebar.info("🔄 Trying Cal.com v2 API for event types...")
-                response = requests.get(
+                response = self._make_request_with_retry(
+                    "GET",
                     "https://api.cal.com/v2/event-types",
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
                         "cal-api-version": "2024-08-13"
                     },
-                    timeout=10
+                    timeout=15,  # Increased timeout
+                    max_retries=2
                 )
                 
                 st.sidebar.info(f"📥 V2 response status: {response.status_code}")
@@ -172,10 +247,12 @@ class CalComAPI:
                     
             except Exception as v2_error:
                 st.sidebar.warning(f"V2 API failed: {str(v2_error)}, trying V1 API...")
-                response = requests.get(
+                response = self._make_request_with_retry(
+                    "GET",
                     f"https://api.cal.com/v1/event-types?apiKey={self.api_key}",
                     headers={"Content-Type": "application/json"},
-                    timeout=10
+                    timeout=15,  # Increased timeout
+                    max_retries=2
                 )
                 st.sidebar.info(f"📥 V1 response status: {response.status_code}")
             
@@ -189,12 +266,15 @@ class CalComAPI:
                 st.sidebar.error(f"❌ Event types fetch failed with status {response.status_code}")
                 st.sidebar.code(json.dumps(error_details, indent=2), language="json")
                 
-                return {
-                    "success": False, 
-                    "error": f"Failed to fetch event types: {response.text}",
-                    "error_details": error_details,
-                    "event_types": []
-                }
+            # Log the error
+            self._log_error("get_event_types", f"API returned {response.status_code}", error_details)
+            
+            return {
+                "success": False, 
+                "error": f"Failed to fetch event types: {response.text}",
+                "error_details": error_details,
+                "event_types": []
+            }
             
             response.raise_for_status()
             data = response.json()
@@ -237,6 +317,9 @@ class CalComAPI:
                 }
                 error_msg += f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
             st.sidebar.error(error_msg)
+            # Log the error
+            self._log_error("get_event_types", error_msg, error_details)
+            
             return {
                 "success": False, 
                 "error": error_msg, 
@@ -250,10 +333,11 @@ class CalComAPI:
             st.sidebar.info(f"🔍 Checking slots for event type {event_type_id}")
             st.sidebar.info(f"Date range: {start_date} to {end_date}")
             
-            # Try v2 API first
+            # Try v2 API first with retry logic
             try:
                 st.sidebar.info("🔄 Trying Cal.com v2 API for slots...")
-                response = requests.get(
+                response = self._make_request_with_retry(
+                    "GET",
                     f"https://api.cal.com/v2/slots/available",
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
@@ -267,7 +351,8 @@ class CalComAPI:
                         # Ensure slots are computed for LA timezone
                         "timeZone": "America/Los_Angeles",
                     },
-                    timeout=10
+                    timeout=15,  # Increased timeout
+                    max_retries=2
                 )
                 st.sidebar.info(f"V2 API Status: {response.status_code}")
                 
@@ -277,8 +362,9 @@ class CalComAPI:
                     
             except Exception as v2_error:
                 st.sidebar.warning(f"V2 API failed: {str(v2_error)}, trying v1...")
-                # Fallback to v1 API with query params
-                response = requests.get(
+                # Fallback to v1 API with query params and retry logic
+                response = self._make_request_with_retry(
+                    "GET",
                     f"https://api.cal.com/v1/slots?apiKey={self.api_key}",
                     headers={
                         "Content-Type": "application/json"
@@ -289,7 +375,8 @@ class CalComAPI:
                         "endTime": end_date,
                         "timeZone": "America/Los_Angeles",
                     },
-                    timeout=10
+                    timeout=15,  # Increased timeout
+                    max_retries=2
                 )
                 st.sidebar.info(f"V1 API Status: {response.status_code}")
             
@@ -429,21 +516,39 @@ class CalComAPI:
         attendee_language: str = "en",
         meeting_reason: str = ""
     ) -> Dict[str, Any]:
-        """Create a new booking"""
+        """Create a new booking with deduplication"""
         try:
-            payload = {
-                "eventTypeId": event_type_id,
-                "start": start_time,
-                "attendee": {
-                    "name": attendee_name,
-                    "email": attendee_email,
-                    "timeZone": attendee_timezone,
-                    "language": attendee_language
+            # Create a unique key for this booking request to prevent duplicates
+            booking_key = f"{event_type_id}:{start_time}:{attendee_email}"
+            
+            # Check if we're already processing this booking
+            if hasattr(self, '_processing_bookings'):
+                if booking_key in self._processing_bookings:
+                    return {
+                        "success": False,
+                        "error": "This booking is already being processed. Please wait...",
+                        "duplicate_request": True
+                    }
+            else:
+                self._processing_bookings = set()
+            
+            # Mark this booking as being processed
+            self._processing_bookings.add(booking_key)
+            
+            try:
+                payload = {
+                    "eventTypeId": event_type_id,
+                    "start": start_time,
+                    "attendee": {
+                        "name": attendee_name,
+                        "email": attendee_email,
+                        "timeZone": attendee_timezone,
+                        "language": attendee_language
+                    }
                 }
-            }
 
-            if meeting_reason:
-                payload["metadata"] = {"reason": meeting_reason}
+                if meeting_reason:
+                    payload["metadata"] = {"reason": meeting_reason}
 
             # Validate payload before sending
             validation = self.validate_booking_payload(payload)
@@ -460,10 +565,11 @@ class CalComAPI:
             st.sidebar.code(json.dumps(payload, indent=2), language="json")
             st.sidebar.info(f"🌍 Timezone: {attendee_timezone} (PDT) | 🗣️ Language: {attendee_language}")
 
-            # Try v2 API first with proper headers
+            # Try v2 API first with proper headers and retry logic
             try:
                 st.sidebar.info("🔄 Trying Cal.com v2 API...")
-                response = requests.post(
+                response = self._make_request_with_retry(
+                    "POST",
                     f"https://api.cal.com/v2/bookings",
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
@@ -471,7 +577,8 @@ class CalComAPI:
                         "cal-api-version": "2024-08-13"
                     },
                     json=payload,
-                    timeout=15
+                    timeout=20,  # Increased timeout for booking creation
+                    max_retries=3  # More retries for critical booking operations
                 )
                 st.sidebar.info(f"📥 V2 Response: {response.status_code}")
                 
@@ -482,42 +589,79 @@ class CalComAPI:
             except Exception as v2_error:
                 st.sidebar.warning(f"V2 API failed: {str(v2_error)}, trying v1...")
                 
-                # Fallback to v1 API with proper headers
-                response = requests.post(
+                # Fallback to v1 API with proper headers and retry logic
+                response = self._make_request_with_retry(
+                    "POST",
                     f"https://api.cal.com/v1/bookings?apiKey={self.api_key}",
                     headers={
                         "Content-Type": "application/json"
                     },
                     json=payload,
-                    timeout=15
+                    timeout=20,  # Increased timeout
+                    max_retries=3  # More retries for critical operations
                 )
                 st.sidebar.info(f"📥 V1 Response: {response.status_code}")
             
-            # Detailed error logging
+            # Detailed error logging with better error parsing
             if response.status_code >= 400:
                 error_details = {
                     "status_code": response.status_code,
                     "response_text": response.text,
                     "request_payload": payload,
-                    "api_version": "v2" if "v2" in response.url else "v1"
+                    "api_version": "v2" if "v2" in response.url else "v1",
+                    "timestamp": datetime.now().isoformat()
                 }
                 st.sidebar.error(f"❌ Booking failed with status {response.status_code}")
                 st.sidebar.code(json.dumps(error_details, indent=2), language="json")
                 
-                # Try to parse error message from response
+                # Enhanced error message parsing
+                error_message = "Unknown error"
                 try:
                     error_data = response.json()
-                    error_message = error_data.get("message", "Unknown error")
-                    if "data" in error_data and isinstance(error_data["data"], dict):
-                        error_message = error_data["data"].get("message", error_message)
-                except:
-                    error_message = response.text
+                    
+                    # Try multiple error message locations
+                    if isinstance(error_data, dict):
+                        error_message = (error_data.get("message") or 
+                                       error_data.get("error") or 
+                                       error_data.get("errorMessage") or 
+                                       "Unknown error")
+                        
+                        # Check nested data structure
+                        if "data" in error_data and isinstance(error_data["data"], dict):
+                            nested_error = (error_data["data"].get("message") or 
+                                          error_data["data"].get("error") or 
+                                          error_data["data"].get("errorMessage"))
+                            if nested_error:
+                                error_message = nested_error
+                        
+                        # Check for validation errors
+                        if "errors" in error_data and isinstance(error_data["errors"], list):
+                            validation_errors = [str(err) for err in error_data["errors"]]
+                            error_message = f"Validation errors: {', '.join(validation_errors)}"
+                            
+                except Exception as parse_error:
+                    st.sidebar.warning(f"Could not parse error response: {parse_error}")
+                    error_message = response.text[:500]  # Truncate long responses
+                
+                # Add specific error handling for common issues
+                if response.status_code == 409:
+                    error_message = "Time slot is no longer available. Please try a different time."
+                elif response.status_code == 422:
+                    error_message = "Invalid booking data. Please check your meeting details."
+                elif response.status_code == 429:
+                    error_message = "Too many requests. Please wait a moment and try again."
+                elif response.status_code >= 500:
+                    error_message = "Cal.com server error. Please try again in a few minutes."
+                
+                # Log the error for debugging
+                self._log_error("create_booking", error_message, error_details)
                 
                 return {
                     "success": False, 
                     "error": f"Booking failed: {error_message}",
                     "error_details": error_details,
-                    "status_code": response.status_code
+                    "status_code": response.status_code,
+                    "retry_suggested": response.status_code >= 500
                 }
             
             response.raise_for_status()
@@ -529,14 +673,19 @@ class CalComAPI:
                 # Sometimes the booking data is directly in the response
                 booking_data = result
 
-            st.sidebar.success(f"✅ Booking created! ID: {booking_data.get('id')}, UID: {booking_data.get('uid')}")
-            return {
-                "success": True, 
-                "data": booking_data, 
-                "booking_id": booking_data.get("id"), 
-                "booking_uid": booking_data.get("uid"),
-                "api_version": "v2" if "v2" in response.url else "v1"
-            }
+                st.sidebar.success(f"✅ Booking created! ID: {booking_data.get('id')}, UID: {booking_data.get('uid')}")
+                return {
+                    "success": True, 
+                    "data": booking_data, 
+                    "booking_id": booking_data.get("id"), 
+                    "booking_uid": booking_data.get("uid"),
+                    "api_version": "v2" if "v2" in response.url else "v1"
+                }
+            finally:
+                # Always remove from processing set
+                if hasattr(self, '_processing_bookings') and booking_key in self._processing_bookings:
+                    self._processing_bookings.remove(booking_key)
+                    
         except requests.exceptions.RequestException as e:
             error_msg = f"❌ Failed to create booking: {str(e)}"
             error_details = {}
@@ -544,10 +693,15 @@ class CalComAPI:
                 error_details = {
                     "status_code": e.response.status_code,
                     "response_text": e.response.text,
-                    "request_payload": payload
+                    "request_payload": payload if 'payload' in locals() else {}
                 }
                 error_msg += f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
             st.sidebar.error(error_msg)
+            
+            # Clean up processing set on error
+            if hasattr(self, '_processing_bookings') and 'booking_key' in locals() and booking_key in self._processing_bookings:
+                self._processing_bookings.remove(booking_key)
+                
             return {
                 "success": False, 
                 "error": error_msg,
@@ -753,6 +907,23 @@ tools = [
 ]
 
 
+def safe_get_session_state(key: str, default=None):
+    """Safely get session state value with error handling"""
+    try:
+        return st.session_state.get(key, default)
+    except Exception as e:
+        st.sidebar.warning(f"Session state error for key '{key}': {str(e)}")
+        return default
+
+def safe_set_session_state(key: str, value):
+    """Safely set session state value with error handling"""
+    try:
+        st.session_state[key] = value
+        return True
+    except Exception as e:
+        st.sidebar.warning(f"Session state error setting '{key}': {str(e)}")
+        return False
+
 def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: CalComAPI) -> str:
     """Execute function calls"""
     
@@ -797,9 +968,11 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
         event_type_id = arguments.get("event_type_id")
 
         # Check for manual override first
-        if not event_type_id and 'manual_event_id' in st.session_state:
-            event_type_id = st.session_state.manual_event_id
-            st.sidebar.success(f"🎯 Using manually specified event type ID: {event_type_id}")
+        if not event_type_id:
+            manual_event_id = safe_get_session_state('manual_event_id')
+            if manual_event_id:
+                event_type_id = manual_event_id
+                st.sidebar.success(f"🎯 Using manually specified event type ID: {event_type_id}")
 
         # Get event type if not provided
         if not event_type_id:
@@ -871,9 +1044,11 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
             event_type_id = arguments.get("event_type_id")
             
             # Check for manual override
-            if not event_type_id and 'manual_event_id' in st.session_state:
-                event_type_id = st.session_state.manual_event_id
-                st.sidebar.success(f"🎯 Using manually specified event type ID: {event_type_id}")
+            if not event_type_id:
+                manual_event_id = safe_get_session_state('manual_event_id')
+                if manual_event_id:
+                    event_type_id = manual_event_id
+                    st.sidebar.success(f"🎯 Using manually specified event type ID: {event_type_id}")
             
             if not event_type_id:
                 st.sidebar.info("🔍 Fetching event types for manual booking...")
@@ -940,9 +1115,11 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
         meeting_reason = arguments.get("meeting_reason", "")
         
         # Check for manual override
-        if not event_type_id and 'manual_event_id' in st.session_state:
-            event_type_id = st.session_state.manual_event_id
-            st.sidebar.success(f"🎯 Using manually specified event type ID: {event_type_id}")
+        if not event_type_id:
+            manual_event_id = safe_get_session_state('manual_event_id')
+            if manual_event_id:
+                event_type_id = manual_event_id
+                st.sidebar.success(f"🎯 Using manually specified event type ID: {event_type_id}")
         
         # Try to match meeting reason with event type title
         if not event_type_id:
@@ -1161,8 +1338,10 @@ def main():
         if manual_event_id:
             try:
                 manual_event_id = int(manual_event_id)
-                st.session_state.manual_event_id = manual_event_id
-                st.success(f"✅ Will use event type ID: {manual_event_id}")
+                if safe_set_session_state('manual_event_id', manual_event_id):
+                    st.success(f"✅ Will use event type ID: {manual_event_id}")
+                else:
+                    st.error("❌ Failed to save event type ID to session state")
             except:
                 st.error("❌ Event type ID must be a number")
 
@@ -1178,18 +1357,39 @@ def main():
         if user_email:
             st.markdown("---")
             st.markdown("### 🔗 Quick Links")
-            if 'manual_event_id' in st.session_state:
-                event_id = st.session_state.manual_event_id
-                st.markdown(f"[📅 Check Availability](https://cal.com/event-types/{event_id})")
+            manual_event_id = safe_get_session_state('manual_event_id')
+            if manual_event_id:
+                st.markdown(f"[📅 Check Availability](https://cal.com/event-types/{manual_event_id})")
             st.markdown("[⚙️ Manage Event Types](https://app.cal.com/event-types)")
             st.markdown("[🔑 API Keys](https://app.cal.com/settings/developer/api-keys)")
 
         if st.button("Clear Chat History"):
             st.session_state.messages = []
             st.rerun()
+        
+        # Add clear error log button
+        if calcom_key and st.button("🗑️ Clear Error Log"):
+            cal_api = CalComAPI(calcom_key)
+            cal_api.error_log = []
+            st.success("Error log cleared!")
+            st.rerun()
 
         st.markdown("---")
         st.markdown("### 🔍 Debug Info")
+        
+        # Add error log display
+        if calcom_key:
+            cal_api = CalComAPI(calcom_key)
+            error_log = cal_api.get_error_log()
+            if error_log:
+                with st.expander("📋 Recent Error Log", expanded=False):
+                    for i, error in enumerate(error_log):
+                        st.write(f"**Error #{i+1}** ({error['timestamp']})")
+                        st.write(f"Operation: {error['operation']}")
+                        st.write(f"Error: {error['error']}")
+                        if error['details']:
+                            st.json(error['details'])
+                        st.markdown("---")
         
         # Add diagnostic button
         if calcom_key and st.button("🔧 Test Cal.com Connection"):
@@ -1306,6 +1506,15 @@ def main():
                     return
                 
                 st.success("🎉 All booking tests passed! The booking system should work correctly.")
+                
+                # Show error log if there are any errors
+                error_log = test_api.get_error_log()
+                if error_log:
+                    st.warning("⚠️ Some errors were logged during testing:")
+                    for error in error_log[-3:]:  # Show last 3 errors
+                        st.write(f"- {error['operation']}: {error['error']}")
+                else:
+                    st.info("✅ No errors logged during testing.")
 
     # Initialize session state
     if "messages" not in st.session_state:
@@ -1380,6 +1589,12 @@ Be conversational and helpful!"""
                     response_text = f"Error: {str(e)}"
                     st.error(response_text)
                     st.sidebar.error(f"Exception details: {str(e)}")
+                    
+                    # Log the error for debugging
+                    cal_api._log_error("chat_with_assistant", str(e), {
+                        "user_input": prompt,
+                        "session_state_keys": list(st.session_state.keys()) if hasattr(st, 'session_state') else []
+                    })
 
         st.session_state.messages.append({"role": "assistant", "content": response_text})
         st.rerun()
