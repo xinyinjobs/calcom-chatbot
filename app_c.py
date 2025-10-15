@@ -51,17 +51,49 @@ class CalComAPI:
     def get_event_types(self) -> Dict[str, Any]:
         """Get available event types"""
         try:
+            st.sidebar.info("📤 Fetching event types...")
+            
+            # Try v2 API first with Bearer token
             response = requests.get(
-                f"https://api.cal.com/v2/event-types?apiKey={self.api_key}",
+                "https://api.cal.com/v2/event-types",
                 headers={
+                    "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
-                    "cal-api-version": "2024-06-14"
+                    "cal-api-version": "2024-08-13"
                 },
                 timeout=10
             )
+            
+            st.sidebar.info(f"📥 Event types response status: {response.status_code}")
+            
+            # If v2 fails, try v1
+            if response.status_code >= 400:
+                st.sidebar.warning(f"V2 failed ({response.status_code}), trying V1 API...")
+                response = requests.get(
+                    f"https://api.cal.com/v1/event-types?apiKey={self.api_key}",
+                    headers={"Content-Type": "application/json"},
+                    timeout=10
+                )
+                st.sidebar.info(f"📥 V1 response status: {response.status_code}")
+            
             response.raise_for_status()
             data = response.json()
-            event_types = data.get("data", [])
+            
+            # Log raw response for debugging
+            st.sidebar.code(f"Event types raw response:\n{json.dumps(data, indent=2)[:800]}", language="json")
+            
+            # Parse event types from different response structures
+            event_types = []
+            
+            # Structure 1: {data: [...]}
+            if "data" in data:
+                event_types = data["data"] if isinstance(data["data"], list) else []
+            # Structure 2: {event_types: [...]}
+            elif "event_types" in data:
+                event_types = data["event_types"] if isinstance(data["event_types"], list) else []
+            # Structure 3: direct array
+            elif isinstance(data, list):
+                event_types = data
 
             if event_types:
                 st.sidebar.success(f"✅ Found {len(event_types)} event types")
@@ -435,14 +467,40 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
         date = arguments.get("date")
         event_type_id = arguments.get("event_type_id")
 
+        # Check for manual override first
+        if not event_type_id and 'manual_event_id' in st.session_state:
+            event_type_id = st.session_state.manual_event_id
+            st.sidebar.success(f"🎯 Using manually specified event type ID: {event_type_id}")
+
         # Get event type if not provided
         if not event_type_id:
+            st.sidebar.info("🔍 No event_type_id provided, fetching available event types...")
             evt_resp = cal_api.get_event_types()
-            if evt_resp.get("success") and evt_resp.get("event_types"):
-                event_type_id = evt_resp["event_types"][0].get("id")
-                st.sidebar.info(f"Using event type ID: {event_type_id}")
+            
+            if not evt_resp.get("success"):
+                return json.dumps({
+                    "success": False, 
+                    "error": f"Failed to fetch event types: {evt_resp.get('error')}",
+                    "user_message": "I couldn't connect to your Cal.com account to fetch event types. Please check your API key or enter the event type ID manually in the sidebar."
+                })
+            
+            event_types = evt_resp.get("event_types", [])
+            if not event_types:
+                return json.dumps({
+                    "success": False,
+                    "error": "No event types configured in Cal.com",
+                    "user_message": "I can see you have an event type at cal.com/xin-tnkutt/interview, but the API can't access it. This usually means:\n\n1. Your API key doesn't have permission (try regenerating it)\n2. The event type is in a team workspace (use a personal API key)\n3. You can manually enter the event type ID in the sidebar instead.",
+                    "action_required": "Check API key permissions or enter event type ID manually"
+                })
+            
+            # Try to find "interview" event type
+            interview_et = next((et for et in event_types if 'interview' in str(et.get('slug', '')).lower() or 'interview' in str(et.get('title', '')).lower()), None)
+            if interview_et:
+                event_type_id = interview_et.get("id")
+                st.sidebar.success(f"🎯 Found interview event type! ID: {event_type_id}")
             else:
-                return json.dumps({"success": False, "error": "No event types configured in Cal.com. Please create an event type first."})
+                event_type_id = event_types[0].get("id")
+                st.sidebar.success(f"✅ Using first event type: {event_types[0].get('title')} (ID: {event_type_id})")
 
         start_date = f"{date}T00:00:00Z"
         end_date = f"{date}T23:59:59Z"
@@ -474,6 +532,42 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
         time = arguments.get("time")  # Format: "14:00"
         
         try:
+            # Get event type first
+            event_type_id = arguments.get("event_type_id")
+            
+            # Check for manual override
+            if not event_type_id and 'manual_event_id' in st.session_state:
+                event_type_id = st.session_state.manual_event_id
+                st.sidebar.success(f"🎯 Using manually specified event type ID: {event_type_id}")
+            
+            if not event_type_id:
+                st.sidebar.info("🔍 Fetching event types for manual booking...")
+                evt_resp = cal_api.get_event_types()
+                
+                if not evt_resp.get("success"):
+                    return json.dumps({
+                        "success": False,
+                        "error": f"Failed to fetch event types: {evt_resp.get('error')}",
+                        "user_message": "I couldn't connect to your Cal.com account. Try entering the event type ID manually in the sidebar."
+                    })
+                
+                event_types = evt_resp.get("event_types", [])
+                if not event_types:
+                    return json.dumps({
+                        "success": False,
+                        "error": "No event types available",
+                        "user_message": "Can't auto-detect event types. Please enter your event type ID manually in the sidebar."
+                    })
+                
+                # Try to find interview event type
+                interview_et = next((et for et in event_types if 'interview' in str(et.get('slug', '')).lower()), None)
+                if interview_et:
+                    event_type_id = interview_et.get("id")
+                    st.sidebar.success(f"🎯 Found interview event type: {interview_et.get('title')} (ID: {event_type_id})")
+                else:
+                    event_type_id = event_types[0].get("id")
+                    st.sidebar.success(f"✅ Using event type: {event_types[0].get('title')} (ID: {event_type_id})")
+            
             # Parse PST time
             pst_datetime = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
             # Add 8 hours to convert PST to UTC
@@ -481,15 +575,6 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
             start_time = utc_datetime.strftime("%Y-%m-%dT%H:%M:%SZ")
             
             st.sidebar.info(f"Converting {date} {time} PST → {start_time} UTC")
-            
-            # Get event type
-            event_type_id = arguments.get("event_type_id")
-            if not event_type_id:
-                evt_resp = cal_api.get_event_types()
-                if evt_resp.get("success") and evt_resp.get("event_types"):
-                    event_type_id = evt_resp["event_types"][0].get("id")
-                else:
-                    return json.dumps({"success": False, "error": "No event types available"})
             
             result = cal_api.create_booking(
                 event_type_id=event_type_id,
@@ -506,13 +591,39 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
     elif function_name == "create_booking":
         event_type_id = arguments.get("event_type_id")
         
+        # Check for manual override
+        if not event_type_id and 'manual_event_id' in st.session_state:
+            event_type_id = st.session_state.manual_event_id
+            st.sidebar.success(f"🎯 Using manually specified event type ID: {event_type_id}")
+        
         # Get event type if not provided
         if not event_type_id:
+            st.sidebar.info("🔍 Fetching event types for booking...")
             evt_resp = cal_api.get_event_types()
-            if evt_resp.get("success") and evt_resp.get("event_types"):
-                event_type_id = evt_resp["event_types"][0].get("id")
+            
+            if not evt_resp.get("success"):
+                return json.dumps({
+                    "success": False,
+                    "error": f"Failed to fetch event types: {evt_resp.get('error')}",
+                    "user_message": "I couldn't connect to your Cal.com account. Try entering the event type ID manually in the sidebar."
+                })
+            
+            event_types = evt_resp.get("event_types", [])
+            if not event_types:
+                return json.dumps({
+                    "success": False,
+                    "error": "No event types available",
+                    "user_message": "Can't auto-detect event types. Please enter your event type ID manually in the sidebar."
+                })
+            
+            # Try to find interview event type
+            interview_et = next((et for et in event_types if 'interview' in str(et.get('slug', '')).lower()), None)
+            if interview_et:
+                event_type_id = interview_et.get("id")
+                st.sidebar.success(f"🎯 Found interview event type: {interview_et.get('title')} (ID: {event_type_id})")
             else:
-                return json.dumps({"success": False, "error": "No event types available"})
+                event_type_id = event_types[0].get("id")
+                st.sidebar.success(f"✅ Using event type: {event_types[0].get('title')} (ID: {event_type_id})")
 
         result = cal_api.create_booking(
             event_type_id=event_type_id,
@@ -623,6 +734,22 @@ def main():
             placeholder="user@example.com", 
             help="Your email for booking management"
         )
+        
+        st.markdown("---")
+        st.markdown("### 🎯 Manual Event Type (Optional)")
+        manual_event_id = st.text_input(
+            "Event Type ID",
+            placeholder="Leave empty to auto-detect",
+            help="If auto-detection fails, enter your event type ID manually"
+        )
+        
+        if manual_event_id:
+            try:
+                manual_event_id = int(manual_event_id)
+                st.session_state.manual_event_id = manual_event_id
+                st.success(f"✅ Will use event type ID: {manual_event_id}")
+            except:
+                st.error("❌ Event type ID must be a number")
 
         st.info("🕐 All times shown in PST/PDT")
 
@@ -639,6 +766,39 @@ def main():
 
         st.markdown("---")
         st.markdown("### 🔍 Debug Info")
+        
+        # Add diagnostic button
+        if calcom_key and st.button("🔧 Test Cal.com Connection"):
+            with st.spinner("Testing..."):
+                test_api = CalComAPI(calcom_key)
+                
+                st.write("**Testing Event Types API...**")
+                result = test_api.get_event_types()
+                
+                if result.get("success"):
+                    event_types = result.get("event_types", [])
+                    if event_types:
+                        st.success(f"✅ Successfully found {len(event_types)} event types!")
+                        
+                        # Show all event types in detail
+                        for et in event_types:
+                            st.json(et)
+                            
+                        # Check for "interview" event type
+                        interview_et = next((et for et in event_types if 'interview' in str(et.get('slug', '')).lower() or 'interview' in str(et.get('title', '')).lower()), None)
+                        if interview_et:
+                            st.success(f"🎯 Found your 'interview' event type! ID: {interview_et.get('id')}")
+                        else:
+                            st.warning("⚠️ Couldn't find event type with 'interview' in name/slug")
+                    else:
+                        st.error("⚠️ API connected but NO event types found!")
+                        st.info("👉 This might mean:")
+                        st.write("- Your API key doesn't have permission to read event types")
+                        st.write("- The event type is in a team workspace (try personal API key)")
+                        st.write("- The event type exists but API can't access it")
+                else:
+                    st.error(f"❌ API call failed: {result.get('error')}")
+                    st.warning("Check your API key permissions")
 
     # Initialize session state
     if "messages" not in st.session_state:
