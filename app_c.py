@@ -256,7 +256,7 @@ class CalComAPI:
                 )
                 st.sidebar.info(f"📥 V1 response status: {response.status_code}")
             
-            # Check for errors before processing
+            # Handle error responses immediately
             if response.status_code >= 400:
                 error_details = {
                     "status_code": response.status_code,
@@ -265,18 +265,16 @@ class CalComAPI:
                 }
                 st.sidebar.error(f"❌ Event types fetch failed with status {response.status_code}")
                 st.sidebar.code(json.dumps(error_details, indent=2), language="json")
-            else:
-                error_details = {}
-            # Log the error
-            self._log_error("get_event_types", f"API returned {response.status_code}", error_details)
-            
-            return {
-                "success": False, 
-                "error": f"Failed to fetch event types: {response.text}",
-                "error_details": error_details,
-                "event_types": []
-            }
-            
+                # Log the error and return
+                self._log_error("get_event_types", f"API returned {response.status_code}", error_details)
+                return {
+                    "success": False, 
+                    "error": f"Failed to fetch event types: {response.text}",
+                    "error_details": error_details,
+                    "event_types": []
+                }
+
+            # Success path
             response.raise_for_status()
             data = response.json()
             
@@ -671,22 +669,27 @@ class CalComAPI:
             
             response.raise_for_status()
             result = response.json()
-            
-            # Handle different response structures
-            try:
-                booking_data = result.get("data", {})
-                if not booking_data and isinstance(result, dict):
-                    # Sometimes the booking data is directly in the response
-                    booking_data = result
 
-                    st.sidebar.success(f"✅ Booking created! ID: {booking_data.get('id')}, UID: {booking_data.get('uid')}")
-                    return {
-                        "success": True, 
-                        "data": booking_data, 
-                        "booking_id": booking_data.get("id"), 
-                        "booking_uid": booking_data.get("uid"),
-                        "api_version": "v2" if "v2" in response.url else "v1"
-                    }
+            # Handle different response structures and always return success on 2xx
+            try:
+                booking_data = None
+                if isinstance(result, dict):
+                    booking_data = result.get("data") if isinstance(result.get("data"), dict) else None
+                    if booking_data is None:
+                        booking_data = result
+                else:
+                    booking_data = {"raw": result}
+
+                st.sidebar.success(
+                    f"✅ Booking created! ID: {booking_data.get('id')}, UID: {booking_data.get('uid')}"
+                )
+                return {
+                    "success": True,
+                    "data": booking_data,
+                    "booking_id": booking_data.get("id"),
+                    "booking_uid": booking_data.get("uid"),
+                    "api_version": "v2" if "v2" in response.url else "v1",
+                }
             except Exception as e:
                 st.sidebar.error(f"❌ Failed to handle booking response: {e}")
                 return {"success": False, "error": str(e)}
@@ -719,30 +722,74 @@ class CalComAPI:
             }
 
     def get_bookings(self, attendee_email: Optional[str] = None) -> Dict[str, Any]:
-        """Get all bookings"""
+        """Get bookings, trying v2 first then fallback to v1; normalize shape."""
         try:
             params = {}
             if attendee_email:
                 params["attendeeEmail"] = attendee_email
 
-            st.sidebar.info(f"📤 Fetching bookings: {params}")
-            response = requests.get(
-                f"https://api.cal.com/v1/bookings?apiKey={self.api_key}",
-                headers=self.headers, 
-                params=params, 
-                timeout=15
-            )
-            
-            st.sidebar.info(f"📥 Response: {response.status_code}")
-            response.raise_for_status()
-            data = response.json()
-            bookings = data.get("data", [])
+            st.sidebar.info(f"📤 Fetching bookings (v2)... {params}")
+            try:
+                # Try v2 with Bearer auth
+                v2_resp = self._make_request_with_retry(
+                    "GET",
+                    "https://api.cal.com/v2/bookings",
+                    headers=self.headers,
+                    params=params,
+                    timeout=15,
+                    max_retries=2,
+                )
+                st.sidebar.info(f"📥 V2 Response: {v2_resp.status_code}")
+                if v2_resp.status_code >= 400:
+                    raise requests.exceptions.HTTPError(f"V2 API returned {v2_resp.status_code}")
+                response = v2_resp
+            except Exception as v2_error:
+                st.sidebar.warning(f"V2 failed: {v2_error}; trying v1...")
+                response = self._make_request_with_retry(
+                    "GET",
+                    f"https://api.cal.com/v1/bookings?apiKey={self.api_key}",
+                    headers={"Content-Type": "application/json"},
+                    params=params,
+                    timeout=15,
+                    max_retries=2,
+                )
+                st.sidebar.info(f"📥 V1 Response: {response.status_code}")
 
-            # Format times and add UIDs
+            if response.status_code >= 400:
+                error_details = {
+                    "status_code": response.status_code,
+                    "response_text": response.text,
+                    "api_version": "v2" if "v2" in response.url else "v1",
+                }
+                self._log_error("get_bookings", "API error", error_details)
+                st.sidebar.error(f"❌ Failed to get bookings: {response.status_code}")
+                st.sidebar.code(json.dumps(error_details, indent=2), language="json")
+                return {"success": False, "error": "API error", "bookings": []}
+
+            response.raise_for_status()
+            raw = response.json()
+
+            # Normalize bookings array from several possible shapes
+            bookings: List[Dict[str, Any]] = []
+            if isinstance(raw, dict):
+                if isinstance(raw.get("data"), list):
+                    bookings = raw.get("data", [])
+                elif isinstance(raw.get("bookings"), list):
+                    bookings = raw.get("bookings", [])
+                else:
+                    # Walk and try to find array of bookings
+                    maybe = raw.get("items") or raw.get("results") or []
+                    if isinstance(maybe, list):
+                        bookings = maybe
+            elif isinstance(raw, list):
+                bookings = raw
+
+            # Format times and add display UID
             for booking in bookings:
-                if "start" in booking:
-                    booking["start_pst"] = format_time_pst(booking["start"])
-                booking["display_uid"] = booking.get("uid", "N/A")
+                if isinstance(booking, dict):
+                    if "start" in booking:
+                        booking["start_pst"] = format_time_pst(booking["start"])
+                    booking["display_uid"] = booking.get("uid") or booking.get("id") or "N/A"
 
             st.sidebar.success(f"✅ Found {len(bookings)} bookings")
             return {"success": True, "bookings": bookings, "count": len(bookings)}
@@ -1573,6 +1620,25 @@ Be conversational and helpful!"""
         if message.get("role") in ["user", "assistant"] and message.get("content"):
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
+
+    # Simple bookings viewer
+    with st.expander("📆 View My Bookings", expanded=False):
+        if user_email:
+            cal_api_view = CalComAPI(calcom_key)
+            view = cal_api_view.get_bookings(attendee_email=user_email)
+            if view.get("success"):
+                if view.get("count", 0) == 0:
+                    st.info("No bookings found for your email yet.")
+                else:
+                    for b in view.get("bookings", [])[:20]:
+                        start_disp = b.get("start_pst") or b.get("start")
+                        uid = b.get("display_uid")
+                        title = b.get("title") or b.get("eventType", {}).get("title") or "Meeting"
+                        st.markdown(f"- {title} at {start_disp} (UID: `{uid}`)")
+            else:
+                st.error(view.get("error", "Failed to load bookings"))
+        else:
+            st.info("Enter your email in the sidebar to view your bookings.")
 
     # Chat input
     if prompt := st.chat_input("Ask me about your meetings..."):
