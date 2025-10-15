@@ -144,7 +144,7 @@ class CalComAPI:
             st.sidebar.code(json.dumps(payload, indent=2), language="json")
 
             response = requests.post(
-                f"{CALCOM_BASE_URL}/bookings", 
+                f"https://api.cal.com/v1/bookings?apiKey={api_key}", 
                 headers=self.headers, 
                 json=payload, 
                 timeout=15
@@ -182,7 +182,7 @@ class CalComAPI:
 
             st.sidebar.info(f"📤 Fetching bookings: {params}")
             response = requests.get(
-                f"{CALCOM_BASE_URL}/bookings", 
+                f"https://api.cal.com/v1/bookings/{booking_uid}?apiKey={api_key}", 
                 headers=self.headers, 
                 params=params, 
                 timeout=15
@@ -214,7 +214,7 @@ class CalComAPI:
         try:
             st.sidebar.info(f"📤 Cancelling UID: {booking_uid}")
             response = requests.delete(
-                f"{CALCOM_BASE_URL}/bookings/{booking_uid}", 
+                f"https://api.cal.com/v1/bookings/{booking_uid}/cancel?apiKey=", 
                 headers=self.headers, 
                 json={"cancellationReason": reason}, 
                 timeout=15
