@@ -62,6 +62,40 @@ def format_time_pst(iso_time: str) -> str:
         return iso_time
 
 
+# Date context helpers
+def _get_effective_la_now() -> datetime:
+    """Return the current datetime in America/Los_Angeles, with optional override.
+
+    If the environment variable TODAY_OVERRIDE (YYYY-MM-DD) is set, use that date
+    at 12:00 (noon) local time to avoid ambiguity around midnight and DST.
+    """
+    la = _get_tz("America/Los_Angeles")
+    override = (os.getenv("TODAY_OVERRIDE") or "").strip()
+    if override:
+        try:
+            base_date = datetime.strptime(override, "%Y-%m-%d")
+            # Use noon to mitigate DST boundary edge cases
+            base_noon = base_date.replace(hour=12, minute=0, second=0, microsecond=0)
+            return _localize_naive(base_noon, la)
+        except Exception:
+            pass
+    return datetime.now(la)
+
+
+def _build_runtime_date_context() -> str:
+    """Construct a concise runtime date/time context for the model."""
+    la_now = _get_effective_la_now()
+    utc = _get_tz("UTC")
+    utc_now = la_now.astimezone(utc)
+    tz_abbr = la_now.tzname() or "PT"
+    today_line = f"Today's date is {la_now.strftime('%Y-%m-%d')} (America/Los_Angeles, {tz_abbr})."
+    time_line = (
+        f"Current time: LA {la_now.strftime('%Y-%m-%d %H:%M')} {tz_abbr} | "
+        f"UTC {utc_now.strftime('%Y-%m-%d %H:%M')} UTC"
+    )
+    return today_line + "\n" + time_line + "\nAlways interpret relative dates from this context."
+
+
 # Cal.com API Class
 class CalComAPI:
     def __init__(self, api_key: str):
@@ -812,9 +846,26 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
 def chat_with_assistant(messages: List[Dict[str, Any]], cal_api: CalComAPI) -> tuple:
     """Send messages to OpenAI using tools API"""
     
+    # Inject fresh runtime date context into the system message on every turn
+    # to avoid stale or hardcoded dates.
+    runtime_ctx = _build_runtime_date_context()
+    enriched_messages = []
+    inserted = False
+    for msg in messages:
+        if not inserted and msg.get("role") == "system":
+            enriched_messages.append({
+                "role": "system",
+                "content": (msg.get("content") or "") + "\n\n" + runtime_ctx
+            })
+            inserted = True
+        else:
+            enriched_messages.append(msg)
+    if not inserted:
+        enriched_messages.insert(0, {"role": "system", "content": runtime_ctx})
+
     response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=messages,
+        messages=enriched_messages,
         tools=tools,
         tool_choice="auto"
     )
@@ -853,9 +904,25 @@ def chat_with_assistant(messages: List[Dict[str, Any]], cal_api: CalComAPI) -> t
         })
 
         # Get final response
+        # Also include runtime context for the second model turn
+        runtime_ctx_2 = _build_runtime_date_context()
+        enriched_messages_2 = []
+        inserted_2 = False
+        for msg in messages:
+            if not inserted_2 and msg.get("role") == "system":
+                enriched_messages_2.append({
+                    "role": "system",
+                    "content": (msg.get("content") or "") + "\n\n" + runtime_ctx_2
+                })
+                inserted_2 = True
+            else:
+                enriched_messages_2.append(msg)
+        if not inserted_2:
+            enriched_messages_2.insert(0, {"role": "system", "content": runtime_ctx_2})
+
         second_response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=messages
+            messages=enriched_messages_2
         )
 
         return second_response.choices[0].message.content, messages
