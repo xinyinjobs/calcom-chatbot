@@ -96,6 +96,56 @@ def _build_runtime_date_context() -> str:
     )
     return today_line + "\n" + time_line + "\nAlways interpret relative dates from this context."
 
+def get_booking_status(booking: Dict[str, Any]) -> tuple[str, str, str]:
+    """
+    Determine booking status and return (status, emoji, color).
+    
+    Returns:
+        tuple: (status_text, emoji, streamlit_color)
+    """
+    from datetime import datetime
+    
+    # Check explicit status field first
+    status = str(booking.get("status", "")).lower()
+    
+    if status == "cancelled":
+        return ("Cancelled", "❌", "red")
+    elif status == "rescheduled":
+        return ("Rescheduled", "🔄", "orange")
+    elif status == "pending":
+        return ("Pending", "⏳", "yellow")
+    elif status == "accepted" or status == "confirmed":
+        # Check if it's in the past or future
+        pass  # Continue to time-based check
+    
+    # Time-based status determination
+    start_time = booking.get("start") or booking.get("startTime")
+    if start_time:
+        try:
+            # Parse ISO time
+            dt_utc = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+            now_utc = datetime.now(dt_utc.tzinfo)
+            
+            if dt_utc < now_utc:
+                return ("Past", "📋", "gray")
+            else:
+                # Check how soon it is
+                time_until = dt_utc - now_utc
+                hours_until = time_until.total_seconds() / 3600
+                
+                if hours_until < 24:
+                    return ("Today", "🔥", "red")
+                elif hours_until < 48:
+                    return ("Tomorrow", "⏰", "orange")
+                elif hours_until < 168:  # 7 days
+                    return ("This Week", "📅", "blue")
+                else:
+                    return ("Upcoming", "✅", "green")
+        except Exception:
+            pass
+    
+    # Default status
+    return ("Scheduled", "📌", "blue")
 
 # Cal.com API Class
 class CalComAPI:
@@ -1781,6 +1831,171 @@ def chat_with_assistant(messages: List[Dict[str, Any]], cal_api: CalComAPI) -> t
 
 
 # Streamlit UI
+def render_enhanced_bookings_section(cal_api, user_email, attendee_name, show_all=False):
+    """Render enhanced bookings section with status indicators"""
+    from datetime import datetime
+    
+    st.markdown("---")
+    st.subheader("📆 Scheduled Events")
+    
+    # Filter options
+    col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
+    
+    with col1:
+        status_filter = st.selectbox(
+            "Filter by Status",
+            ["All", "Upcoming", "Today", "This Week", "Past", "Cancelled"],
+            index=0
+        )
+    
+    with col2:
+        sort_by = st.selectbox(
+            "Sort by",
+            ["Date (Newest First)", "Date (Oldest First)", "Status"],
+            index=0
+        )
+    
+    with col3:
+        fetch_btn = st.button("🔄 Refresh", use_container_width=True)
+    
+    with col4:
+        show_all_btn = st.button("Show All", use_container_width=True)
+    
+    if fetch_btn or show_all_btn:
+        email_filter = (user_email or "").strip() if not show_all_btn else None
+        name_filter = (attendee_name or "").strip() if not show_all_btn else None
+        
+        try:
+            result = cal_api.get_bookings(
+                attendee_email=email_filter,
+                attendee_name=name_filter,
+            )
+        except Exception as e:
+            result = {"success": False, "error": str(e), "bookings": []}
+        
+        if result.get("success") and result.get("count", 0) > 0:
+            bookings = result.get("bookings", [])
+            
+            # Add status to each booking
+            for b in bookings:
+                status_text, emoji, color = get_booking_status(b)
+                b["_status"] = status_text
+                b["_emoji"] = emoji
+                b["_color"] = color
+            
+            # Apply status filter
+            if status_filter != "All":
+                bookings = [b for b in bookings if b["_status"] == status_filter]
+            
+            # Sort bookings
+            if sort_by == "Date (Newest First)":
+                bookings.sort(key=lambda b: b.get("start") or "", reverse=True)
+            elif sort_by == "Date (Oldest First)":
+                bookings.sort(key=lambda b: b.get("start") or "")
+            elif sort_by == "Status":
+                status_order = {"Today": 0, "Tomorrow": 1, "This Week": 2, "Upcoming": 3, "Past": 4, "Cancelled": 5}
+                bookings.sort(key=lambda b: status_order.get(b["_status"], 99))
+            
+            if not bookings:
+                st.info(f"No events matching filter: {status_filter}")
+                return
+            
+            # Group by status
+            status_groups = {}
+            for b in bookings:
+                status = b["_status"]
+                if status not in status_groups:
+                    status_groups[status] = []
+                status_groups[status].append(b)
+            
+            # Display stats
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                upcoming_count = sum(1 for b in bookings if b["_status"] in ["Upcoming", "Today", "Tomorrow", "This Week"])
+                st.metric("Upcoming", upcoming_count)
+            with col2:
+                past_count = sum(1 for b in bookings if b["_status"] == "Past")
+                st.metric("Past", past_count)
+            with col3:
+                cancelled_count = sum(1 for b in bookings if b["_status"] == "Cancelled")
+                st.metric("Cancelled", cancelled_count)
+            with col4:
+                st.metric("Total", len(bookings))
+            
+            st.markdown("---")
+            
+            # Display bookings
+            for b in bookings:
+                start_text = b.get("start_pst") or b.get("start") or ""
+                uid = b.get("display_uid") or b.get("uid") or b.get("id") or "N/A"
+                pa_email = b.get("primary_attendee_email") or ""
+                pa_name = b.get("primary_attendee_name") or ""
+                who = pa_email or pa_name or "(no attendee)"
+                
+                status_text = b["_status"]
+                emoji = b["_emoji"]
+                color = b["_color"]
+                
+                # Create card-like display
+                with st.container():
+                    # Status badge and main info
+                    col_badge, col_main = st.columns([1, 5])
+                    
+                    with col_badge:
+                        if color == "red":
+                            st.error(f"{emoji} {status_text}")
+                        elif color == "orange":
+                            st.warning(f"{emoji} {status_text}")
+                        elif color == "green":
+                            st.success(f"{emoji} {status_text}")
+                        elif color == "blue":
+                            st.info(f"{emoji} {status_text}")
+                        elif color == "yellow":
+                            st.warning(f"{emoji} {status_text}")
+                        else:  # gray
+                            st.text(f"{emoji} {status_text}")
+                    
+                    with col_main:
+                        # Event details
+                        st.markdown(f"**{start_text}**")
+                        st.caption(f"👤 {who} • 🔑 UID: `{uid}`")
+                        
+                        # Action buttons and links
+                        action_cols = st.columns([1, 1, 1, 3])
+                        
+                        booking_url = b.get("booking_url")
+                        reschedule_url = b.get("reschedule_url")
+                        cancel_url = b.get("cancel_url")
+                        
+                        with action_cols[0]:
+                            if booking_url:
+                                st.markdown(f"[🔗 Join]({booking_url})")
+                        
+                        with action_cols[1]:
+                            if reschedule_url and status_text not in ["Cancelled", "Past"]:
+                                st.markdown(f"[🔄 Reschedule]({reschedule_url})")
+                        
+                        with action_cols[2]:
+                            if cancel_url and status_text not in ["Cancelled", "Past"]:
+                                st.markdown(f"[❌ Cancel]({cancel_url})")
+                    
+                    st.markdown("---")
+            
+            st.success(f"✅ Showing {len(bookings)} event(s)")
+            
+        else:
+            err = result.get("error")
+            if err:
+                st.error(f"Failed to fetch bookings: {err}")
+            else:
+                st.info("No scheduled events found for the given filters.")
+    else:
+        st.info("👆 Click 'Refresh' to load your events")
+
+
+# Update the main() function - replace the existing "Scheduled Events" section
+# (lines ~888-928) with this single function call:
+
 def main():
     st.set_page_config(page_title="Cal.com Chatbot", page_icon="📅", layout="wide")
 
@@ -1848,154 +2063,11 @@ def main():
             st.session_state.messages = []
             st.rerun()
         
-        # Add clear error log button
         if calcom_key and st.button("🗑️ Clear Error Log"):
             cal_api = CalComAPI(calcom_key)
             cal_api.error_log = []
             st.success("Error log cleared!")
             st.rerun()
-
-        st.markdown("---")
-        st.markdown("### 🔍 Debug Info")
-        
-        # Add error log display
-        if calcom_key:
-            cal_api = CalComAPI(calcom_key)
-            error_log = cal_api.get_error_log()
-            if error_log:
-                with st.expander("📋 Recent Error Log", expanded=False):
-                    for i, error in enumerate(error_log):
-                        st.write(f"**Error #{i+1}** ({error['timestamp']})")
-                        st.write(f"Operation: {error['operation']}")
-                        st.write(f"Error: {error['error']}")
-                        if error['details']:
-                            st.json(error['details'])
-                        st.markdown("---")
-        
-        # Add diagnostic button
-        if calcom_key and st.button("🔧 Test Cal.com Connection"):
-            with st.spinner("Testing..."):
-                test_api = CalComAPI(calcom_key)
-                
-                st.write("**Testing Event Types API...**")
-                result = test_api.get_event_types()
-                
-                if result.get("success"):
-                    event_types = result.get("event_types", [])
-                    if event_types:
-                        st.success(f"✅ Successfully found {len(event_types)} event types!")
-                        
-                        # Show all event types in detail
-                        for i, et in enumerate(event_types):
-                            st.write(f"**Event Type #{i+1}**")
-                            st.json(et)
-                            
-                            # Generate availability link
-                            et_id = et.get('id')
-                            et_slug = et.get('slug', '')
-                            if et_id:
-                                st.markdown(f"🔗 [Check Availability for this Event Type](https://cal.com/event-types/{et_id})")
-                            if et_slug:
-                                st.info(f"Public booking link: https://cal.com/{et_slug}")
-                            st.markdown("---")
-                            
-                        # Check for "interview" event type
-                        interview_et = next((et for et in event_types if 'interview' in str(et.get('slug', '')).lower() or 'interview' in str(et.get('title', '')).lower()), None)
-                        if interview_et:
-                            st.success(f"🎯 Found your 'interview' event type! ID: {interview_et.get('id')}")
-                        else:
-                            st.warning("⚠️ Couldn't find event type with 'interview' in name/slug")
-                    else:
-                        st.error("⚠️ API connected but NO event types found!")
-                        st.info("👉 This might mean:")
-                        st.write("- Your API key doesn't have permission to read event types")
-                        st.write("- The event type is in a team workspace (try personal API key)")
-                        st.write("- The event type exists but API can't access it")
-                else:
-                    st.error(f"❌ API call failed: {result.get('error')}")
-                    st.warning("Check your API key permissions")
-        
-        # Add booking test button
-        if calcom_key and st.button("🧪 Test Booking Process"):
-            with st.spinner("Testing booking process..."):
-                test_api = CalComAPI(calcom_key)
-                
-                # Test with tomorrow's date
-                from datetime import datetime, timedelta
-                tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-                
-                st.write(f"**Testing booking process for {tomorrow}...**")
-                
-                # Test event types
-                st.write("1. Testing event types...")
-                evt_result = test_api.get_event_types()
-                if not evt_result.get("success"):
-                    st.error(f"❌ Event types failed: {evt_result.get('error')}")
-                    return
-                
-                event_types = evt_result.get("event_types", [])
-                if not event_types:
-                    st.error("❌ No event types found")
-                    return
-                
-                event_type_id = event_types[0].get("id")
-                st.success(f"✅ Found event type: {event_types[0].get('title')} (ID: {event_type_id})")
-                
-                # Test slots
-                st.write("2. Testing available slots...")
-                la = _get_tz("America/Los_Angeles")
-                utc = _get_tz("UTC")
-                local_start = _localize_naive(datetime.strptime(tomorrow, "%Y-%m-%d"), la)
-                local_end = (local_start + timedelta(days=1)) - timedelta(seconds=1)
-                start_date = local_start.astimezone(utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                end_date = local_end.astimezone(utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                
-                slots_result = test_api.get_available_slots(event_type_id, start_date, end_date)
-                if not slots_result.get("success"):
-                    st.error(f"❌ Slots check failed: {slots_result.get('error')}")
-                    st.json(slots_result.get('error_details', {}))
-                    return
-                
-                slots = slots_result.get("slots", [])
-                if not slots:
-                    st.warning("⚠️ No available slots found")
-                    return
-                
-                st.success(f"✅ Found {len(slots)} available slots")
-                
-                # Test booking validation
-                st.write("3. Testing booking validation...")
-                test_payload = {
-                    "eventTypeId": event_type_id,
-                    "start": slots[0],
-                    "attendee": {
-                        "name": "Test User",
-                        "email": "test@example.com",
-                        "timeZone": "America/Los_Angeles",
-                        "language": "en"
-                    }
-                }
-                
-                validation = test_api.validate_booking_payload(test_payload)
-                if validation["valid"]:
-                    st.success("✅ Booking payload validation passed")
-                    if validation["warnings"]:
-                        for warning in validation["warnings"]:
-                            st.warning(f"⚠️ {warning}")
-                else:
-                    st.error(f"❌ Booking payload validation failed: {validation['errors']}")
-                    return
-                
-                st.success("🎉 All booking tests passed! The booking system should work correctly.")
-                
-                # Show error log if there are any errors
-                error_log = test_api.get_error_log()
-                if error_log:
-                    st.warning("⚠️ Some errors were logged during testing:")
-                    for error in error_log[-3:]:  # Show last 3 errors
-                        st.write(f"- {error['operation']}: {error['error']}")
-                else:
-                    st.info("✅ No errors logged during testing.")
 
     # Initialize session state
     if "messages" not in st.session_state:
@@ -2041,61 +2113,8 @@ Be conversational and helpful!"""
 
     cal_api = CalComAPI(calcom_key)
 
-    # Scheduled Events UI
-    st.markdown("---")
-    st.subheader("📆 Scheduled Events")
-    st.caption("Filter by your email or attendee name. Shows booking links when available.")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        fetch_btn = st.button("🔄 Refresh Events")
-    with col_b:
-        show_all_btn = st.button("Show All Events")
-
-    if fetch_btn or show_all_btn:
-        email_filter = (user_email or "").strip()
-        name_filter = (attendee_name or "").strip()
-        try:
-            result = cal_api.get_bookings(
-                attendee_email=None if show_all_btn else (email_filter or None),
-                attendee_name=None if show_all_btn else (name_filter or None),
-            )
-        except Exception as e:
-            result = {"success": False, "error": str(e), "bookings": []}
-
-        if result.get("success") and result.get("count", 0) > 0:
-            bookings = result.get("bookings", [])
-            st.success(f"Found {len(bookings)} scheduled event(s)")
-            for b in bookings:
-                start_text = b.get("start_pst") or b.get("start") or ""
-                uid = b.get("display_uid") or b.get("uid") or b.get("id") or "N/A"
-                pa_email = b.get("primary_attendee_email") or ""
-                pa_name = b.get("primary_attendee_name") or ""
-                who = pa_email or pa_name or "(no attendee)"
-                booking_url = b.get("booking_url")
-                reschedule_url = b.get("reschedule_url")
-                cancel_url = b.get("cancel_url")
-
-                parts = [f"{start_text}", f"UID: `{uid}`"]
-                if who:
-                    parts.insert(1, who)
-                line = " — ".join(parts)
-                st.markdown(line)
-                links = []
-                if booking_url:
-                    links.append(f"[Open]({booking_url})")
-                if reschedule_url:
-                    links.append(f"[Reschedule]({reschedule_url})")
-                if cancel_url:
-                    links.append(f"[Cancel]({cancel_url})")
-                if links:
-                    st.markdown(" ".join(links))
-                st.markdown("---")
-        else:
-            err = result.get("error")
-            if err:
-                st.error(f"Failed to fetch bookings: {err}")
-            else:
-                st.info("No scheduled events found for the given filters.")
+    # Enhanced Scheduled Events Section
+    render_enhanced_bookings_section(cal_api, user_email, attendee_name)
 
     # Display chat messages
     for message in st.session_state.messages:
@@ -2114,7 +2133,6 @@ Be conversational and helpful!"""
             with st.spinner("Thinking..."):
                 working_messages = st.session_state.messages.copy()
                 
-                # Update system message with user email if provided
                 if user_email and working_messages[0]["role"] == "system":
                     working_messages[0]["content"] = working_messages[0]["content"].replace(
                         f"default: {user_email if user_email else 'ask user'}", 
@@ -2129,7 +2147,6 @@ Be conversational and helpful!"""
                     st.error(response_text)
                     st.sidebar.error(f"Exception details: {str(e)}")
                     
-                    # Log the error for debugging
                     cal_api._log_error("chat_with_assistant", str(e), {
                         "user_input": prompt,
                         "session_state_keys": list(st.session_state.keys()) if hasattr(st, 'session_state') else []
