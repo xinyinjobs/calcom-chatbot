@@ -2049,9 +2049,15 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
         except Exception as e:
             return json.dumps({"success": False, "error": f"Failed to parse time: {str(e)}"})
 
+# Replace your execute_function's create_booking section with this:
+
     elif function_name == "create_booking":
         event_type_id = arguments.get("event_type_id")
         meeting_reason = arguments.get("meeting_reason", "")
+        
+        st.sidebar.info(f"🔧 Executing create_booking")
+        st.sidebar.info(f"📝 Event Type ID: {event_type_id}")
+        st.sidebar.info(f"📝 Meeting Reason: {meeting_reason}")
         
         # Check for manual override
         if not event_type_id:
@@ -2066,19 +2072,23 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
             evt_resp = cal_api.get_event_types()
             
             if not evt_resp.get("success"):
-                return json.dumps({
+                error_response = {
                     "success": False,
                     "error": f"Failed to fetch event types: {evt_resp.get('error')}",
                     "user_message": "I couldn't connect to your Cal.com account. Try entering the event type ID manually in the sidebar."
-                })
+                }
+                st.sidebar.error(f"❌ Event types failed: {error_response['error']}")
+                return json.dumps(error_response)
             
             event_types = evt_resp.get("event_types", [])
             if not event_types:
-                return json.dumps({
+                error_response = {
                     "success": False,
                     "error": "No event types available",
                     "user_message": "Can't auto-detect event types. Please enter your event type ID manually in the sidebar."
-                })
+                }
+                st.sidebar.error(f"❌ No event types: {error_response['error']}")
+                return json.dumps(error_response)
             
             # Try to match meeting_reason with event type title
             matched_et = None
@@ -2114,25 +2124,70 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
                         "length": f"{et.get('length', 'N/A')} min"
                     })
                 
-                return json.dumps({
+                no_match_response = {
                     "success": False,
                     "error": "no_matching_event_type",
                     "available_event_types": formatted_types,
                     "user_message": f"I couldn't find an event type matching '{meeting_reason}'. Here are your available event types. Please specify which one you'd like to book.",
                     "action_required": "user_must_choose_event_type"
-                })
-
+                }
+                st.sidebar.info(f"📤 Returning event type options to user")
+                return json.dumps(no_match_response)
+    
+        # Execute the booking
+        st.sidebar.info(f"🚀 Creating booking with event_type_id={event_type_id}")
         result = cal_api.create_booking(
             event_type_id=event_type_id,
             start_time=arguments["start_time"],
             attendee_email=arguments["attendee_email"],
             attendee_name=arguments["attendee_name"],
-            attendee_timezone="America/Los_Angeles",  # PDT timezone
-            attendee_language="en",  # English
+            attendee_timezone="America/Los_Angeles",
+            attendee_language="en",
             meeting_reason=meeting_reason
         )
+        
+        # CRITICAL: Enhanced logging to see what's being returned
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### 📤 BOOKING RESULT")
+        
+        if result.get("success"):
+            st.sidebar.success("✅ ✅ ✅ BOOKING CREATED SUCCESSFULLY!")
+            st.sidebar.markdown("**Booking Details:**")
+            
+            # Extract all key details
+            booking_uid = result.get("booking_uid")
+            booking_id = result.get("booking_id")
+            start_time_pst = result.get("start_time_pst")
+            attendee_email = result.get("attendee_email")
+            attendee_name = result.get("attendee_name")
+            message = result.get("message")
+            
+            # Display in sidebar
+            if booking_uid:
+                st.sidebar.info(f"🔑 UID: **{booking_uid}**")
+            if booking_id:
+                st.sidebar.info(f"🆔 ID: **{booking_id}**")
+            if start_time_pst:
+                st.sidebar.info(f"📅 Time: **{start_time_pst}**")
+            if attendee_email:
+                st.sidebar.info(f"📧 Email: **{attendee_email}**")
+            if attendee_name:
+                st.sidebar.info(f"👤 Name: **{attendee_name}**")
+            if message:
+                st.sidebar.success(f"💬 {message}")
+            
+            # Show full response being sent to AI
+            st.sidebar.markdown("**Full Response to AI:**")
+            st.sidebar.code(json.dumps(result, indent=2), language="json")
+            
+        else:
+            st.sidebar.error("❌ ❌ ❌ BOOKING FAILED!")
+            st.sidebar.error(f"Error: {result.get('error')}")
+            st.sidebar.code(json.dumps(result, indent=2)[:500], language="json")
+        
+        st.sidebar.markdown("---")
+        
         return json.dumps(result)
-
     elif function_name == "get_bookings":
         result = cal_api.get_bookings(
             attendee_email=arguments.get("attendee_email"),
