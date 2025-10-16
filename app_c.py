@@ -2644,7 +2644,7 @@ def main() -> None:
     IMPORTANT: All times are in PST/PDT timezone (America/Los_Angeles).
     
     When booking:
-    1. Get meeting reason from user (e.g., "interview", "consultation")
+    1. Get meeting reason from user (e.g., "interview", "30 Minute Meeting")
     2. FIRST try get_available_slots to check availability
     3. When create_booking is called:
        - If meeting_reason matches an event type title, that event type will be used automatically
