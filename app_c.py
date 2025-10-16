@@ -851,26 +851,98 @@ class CalComAPI:
             return {"success": False, "error": error_msg, "bookings": []}
 
     def cancel_booking(self, booking_uid: str, reason: str = "Cancelled by user") -> Dict[str, Any]:
-        """Cancel a booking"""
+        """Cancel a booking by UID with v2-first strategy and v1 fallback."""
         try:
             st.sidebar.info(f"📤 Cancelling UID: {booking_uid}")
-            response = requests.delete(
-                f"https://api.cal.com/v1/bookings/{booking_uid}/cancel?apiKey={self.api_key}", 
-                headers=self.headers, 
-                json={"cancellationReason": reason}, 
-                timeout=15
-            )
-            
-            st.sidebar.info(f"📥 Response: {response.status_code}")
+
+            # Try Cal.com v2 first (preferred)
+            try:
+                st.sidebar.info("🔄 Trying Cal.com v2 API for cancellation...")
+                response = self._make_request_with_retry(
+                    "POST",
+                    f"https://api.cal.com/v2/bookings/{booking_uid}/cancel",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "cal-api-version": "2024-08-13",
+                    },
+                    json={
+                        # Include both common keys to maximize compatibility across versions
+                        "cancellationReason": reason,
+                        "reason": reason,
+                    },
+                    timeout=15,
+                    max_retries=2,
+                )
+                st.sidebar.info(f"📥 V2 cancel status: {response.status_code}")
+
+                if response.status_code >= 400:
+                    raise requests.exceptions.HTTPError(
+                        f"V2 API returned {response.status_code}"
+                    )
+            except Exception as v2_error:
+                st.sidebar.warning(
+                    f"V2 cancel failed ({str(v2_error)}), trying v1..."
+                )
+                # Fallback to Cal.com v1
+                response = self._make_request_with_retry(
+                    "POST",
+                    f"https://api.cal.com/v1/bookings/{booking_uid}/cancel?apiKey={self.api_key}",
+                    headers={
+                        "Content-Type": "application/json",
+                    },
+                    json={"cancellationReason": reason},
+                    timeout=15,
+                    max_retries=2,
+                )
+                st.sidebar.info(f"📥 V1 cancel status: {response.status_code}")
+
+            # Handle error responses with richer details
+            if response.status_code >= 400:
+                error_details = {
+                    "status_code": response.status_code,
+                    "response_text": response.text,
+                    "booking_uid": booking_uid,
+                    "api_version": "v2" if "/v2/" in response.url else "v1",
+                }
+                st.sidebar.error(
+                    f"❌ Cancellation failed with status {response.status_code}"
+                )
+                st.sidebar.code(json.dumps(error_details, indent=2), language="json")
+                self._log_error("cancel_booking", "Cancellation failed", error_details)
+                return {
+                    "success": False,
+                    "error": f"Cancellation failed: {response.text[:500]}",
+                    "error_details": error_details,
+                }
+
+            # Success
             response.raise_for_status()
+            try:
+                result_json = response.json()
+            except Exception:
+                result_json = {}
             st.sidebar.success("✅ Booking cancelled!")
-            return {"success": True, "message": f"Booking {booking_uid} cancelled"}
+            return {
+                "success": True,
+                "message": f"Booking {booking_uid} cancelled",
+                "data": result_json.get("data", result_json),
+            }
         except requests.exceptions.RequestException as e:
             error_msg = f"❌ Failed to cancel: {str(e)}"
+            error_details: Dict[str, Any] = {}
             if hasattr(e, "response") and e.response is not None:
-                error_msg += f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
+                error_details = {
+                    "status_code": e.response.status_code,
+                    "response_text": e.response.text,
+                    "booking_uid": booking_uid,
+                }
+                error_msg += (
+                    f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
+                )
             st.sidebar.error(error_msg)
-            return {"success": False, "error": error_msg}
+            self._log_error("cancel_booking", error_msg, error_details)
+            return {"success": False, "error": error_msg, "error_details": error_details}
 
     def reschedule_booking(self, booking_uid: str, new_start_time: str, reason: str = "") -> Dict[str, Any]:
         """Reschedule a booking"""
