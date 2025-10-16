@@ -691,14 +691,14 @@ class CalComAPI:
                         "language": attendee_language
                     }
                 }
-
+    
                 if meeting_reason:
                     payload["metadata"] = {"reason": meeting_reason}
             
             except Exception as e:
                 st.sidebar.error(f"❌ Failed to build booking payload: {str(e)}")
                 return {"success": False, "error": f"Payload construction failed: {str(e)}"}
-
+    
             # Validate payload before sending
             validation = self.validate_booking_payload(payload)
             if not validation["valid"]:
@@ -709,11 +709,11 @@ class CalComAPI:
             if validation["warnings"]:
                 for warning in validation["warnings"]:
                     st.sidebar.warning(f"⚠️ {warning}")
-
+    
             st.sidebar.info("📤 Creating booking...")
             st.sidebar.code(json.dumps(payload, indent=2), language="json")
             st.sidebar.info(f"🌍 Timezone: {attendee_timezone} (PDT) | 🗣️ Language: {attendee_language}")
-
+    
             # Try v2 API first with proper headers and retry logic
             try:
                 st.sidebar.info("🔄 Trying Cal.com v2 API...")
@@ -726,8 +726,8 @@ class CalComAPI:
                         "cal-api-version": "2024-08-13"
                     },
                     json=payload,
-                    timeout=20,  # Increased timeout for booking creation
-                    max_retries=3  # More retries for critical booking operations
+                    timeout=20,
+                    max_retries=3
                 )
                 st.sidebar.info(f"📥 V2 Response: {response.status_code}")
                 
@@ -738,7 +738,7 @@ class CalComAPI:
             except Exception as v2_error:
                 st.sidebar.warning(f"V2 API failed: {str(v2_error)}, trying v1...")
                 
-                # Fallback to v1 API with proper headers and retry logic
+                # Fallback to v1 API
                 response = self._make_request_with_retry(
                     "POST",
                     f"https://api.cal.com/v1/bookings?apiKey={self.api_key}",
@@ -746,12 +746,12 @@ class CalComAPI:
                         "Content-Type": "application/json"
                     },
                     json=payload,
-                    timeout=20,  # Increased timeout
-                    max_retries=3  # More retries for critical operations
+                    timeout=20,
+                    max_retries=3
                 )
                 st.sidebar.info(f"📥 V1 Response: {response.status_code}")
             
-            # Detailed error logging with better error parsing
+            # Handle error responses
             if response.status_code >= 400:
                 error_details = {
                     "status_code": response.status_code,
@@ -763,12 +763,11 @@ class CalComAPI:
                 st.sidebar.error(f"❌ Booking failed with status {response.status_code}")
                 st.sidebar.code(json.dumps(error_details, indent=2), language="json")
                 
-                # Enhanced error message parsing
+                # Parse error message
                 error_message = "Unknown error"
                 try:
                     error_data = response.json()
                     
-                    # Try multiple error message locations
                     if isinstance(error_data, dict):
                         error_message = (error_data.get("message") or 
                                        error_data.get("error") or 
@@ -790,9 +789,9 @@ class CalComAPI:
                             
                 except Exception as parse_error:
                     st.sidebar.warning(f"Could not parse error response: {parse_error}")
-                    error_message = response.text[:500]  # Truncate long responses
+                    error_message = response.text[:500]
                 
-                # Add specific error handling for common issues
+                # Add specific error handling
                 if response.status_code == 409:
                     error_message = "Time slot is no longer available. Please try a different time."
                 elif response.status_code == 422:
@@ -802,7 +801,6 @@ class CalComAPI:
                 elif response.status_code >= 500:
                     error_message = "Cal.com server error. Please try again in a few minutes."
                 
-                # Log the error for debugging
                 self._log_error("create_booking", error_message, error_details)
                 
                 return {
@@ -813,33 +811,70 @@ class CalComAPI:
                     "retry_suggested": response.status_code >= 500
                 }
             
+            # ✅ SUCCESS PATH - This is the critical fix!
             response.raise_for_status()
             result = response.json()
             
+            st.sidebar.info("📋 Parsing booking response...")
+            st.sidebar.code(json.dumps(result, indent=2)[:500], language="json")
+            
             # Handle different response structures
-            try:
-                booking_data = result.get("data", {})
-                if not booking_data and isinstance(result, dict):
-                    # Sometimes the booking data is directly in the response
+            booking_data = None
+            booking_id = None
+            booking_uid = None
+            
+            # Try to extract booking data from various response structures
+            if isinstance(result, dict):
+                # Structure 1: {"data": {...booking data...}}
+                if "data" in result and isinstance(result["data"], dict):
+                    booking_data = result["data"]
+                # Structure 2: Direct booking data (v1 style)
+                elif "id" in result or "uid" in result:
                     booking_data = result
-
-                    st.sidebar.success(f"✅ Booking created! ID: {booking_data.get('id')}, UID: {booking_data.get('uid')}")
-                    return {
-                        "success": True, 
-                        "data": booking_data, 
-                        "booking_id": booking_data.get("id"), 
-                        "booking_uid": booking_data.get("uid"),
-                        "api_version": "v2" if "v2" in response.url else "v1"
-                    }
-            except Exception as e:
-                st.sidebar.error(f"❌ Failed to handle booking response: {e}")
-                return {"success": False, "error": str(e)}
-
-            finally:
-                # Always remove from processing set
-                if hasattr(self, '_processing_bookings') and booking_key in self._processing_bookings:
-                    self._processing_bookings.remove(booking_key)
-                    
+                # Structure 3: {"booking": {...}}
+                elif "booking" in result and isinstance(result["booking"], dict):
+                    booking_data = result["booking"]
+            
+            # Extract IDs from booking data
+            if booking_data:
+                booking_id = booking_data.get("id")
+                booking_uid = booking_data.get("uid") or booking_data.get("bookingUid")
+                
+                # Log successful booking details
+                st.sidebar.success(f"✅ Booking created successfully!")
+                st.sidebar.info(f"📝 Booking ID: {booking_id}")
+                st.sidebar.info(f"🔑 Booking UID: {booking_uid}")
+                
+                # Extract additional useful info
+                start_time_display = booking_data.get("start") or booking_data.get("startTime")
+                if start_time_display:
+                    st.sidebar.info(f"📅 Start Time: {format_time_pst(start_time_display)}")
+                
+                # Return comprehensive success response
+                return {
+                    "success": True,
+                    "data": booking_data,
+                    "booking_id": booking_id,
+                    "booking_uid": booking_uid,
+                    "api_version": "v2" if "v2" in response.url else "v1",
+                    "message": f"Booking created successfully! UID: {booking_uid}",
+                    # Include formatted time for easy display
+                    "start_time_pst": format_time_pst(start_time_display) if start_time_display else None,
+                    "attendee_email": attendee_email,
+                    "attendee_name": attendee_name
+                }
+            else:
+                # Couldn't parse booking data
+                st.sidebar.error("⚠️ Booking may have been created but response format is unexpected")
+                st.sidebar.code(json.dumps(result, indent=2), language="json")
+                
+                return {
+                    "success": False,
+                    "error": "Booking response format is unexpected - booking may have been created",
+                    "raw_response": result,
+                    "suggestion": "Check your Cal.com dashboard to verify if the booking was created"
+                }
+                
         except requests.exceptions.RequestException as e:
             error_msg = f"❌ Failed to create booking: {str(e)}"
             error_details = {}
@@ -852,15 +887,21 @@ class CalComAPI:
                 error_msg += f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
             st.sidebar.error(error_msg)
             
-            # Clean up processing set on error
-            if hasattr(self, '_processing_bookings') and 'booking_key' in locals() and booking_key in self._processing_bookings:
-                self._processing_bookings.remove(booking_key)
-                
+            self._log_error("create_booking", error_msg, error_details)
+            
             return {
                 "success": False, 
                 "error": error_msg,
                 "error_details": error_details
             }
+            
+        finally:
+            # Always remove from processing set
+            if hasattr(self, '_processing_bookings') and 'booking_key' in locals():
+                try:
+                    self._processing_bookings.discard(booking_key)
+                except:
+                    pass
 
     def get_bookings(self, attendee_email: Optional[str] = None, attendee_name: Optional[str] = None) -> Dict[str, Any]:
         """Get bookings with optional filtering by attendee email or name, and include useful links."""
