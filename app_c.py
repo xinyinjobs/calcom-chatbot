@@ -1663,9 +1663,9 @@ class CalComAPI:
     # Add this button to your sidebar in main():
     # Place this in the sidebar section where you have other diagnostic buttons
     
-    if calcom_key and st.button("🔬 Diagnose Slots Issue"):
+    if self.api_key and st.button("🔬 Diagnose Slots Issue"):
         with st.spinner("Running diagnostics..."):
-            cal_api = CalComAPI(calcom_key)
+            cal_api = CalComAPI(self.api_key)
             
             # Get event type ID
             event_id = safe_get_session_state('manual_event_id')
