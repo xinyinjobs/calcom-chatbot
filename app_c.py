@@ -2313,91 +2313,78 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
 
 
 def chat_with_assistant(messages: List[Dict[str, Any]], cal_api: CalComAPI) -> tuple:
-    """Send messages to OpenAI using tools API"""
-    
-    # Inject fresh runtime date context into the system message on every turn
-    # to avoid stale or hardcoded dates.
+    """Send messages to OpenAI using tools API with multi-step tool handling."""
+
+    # Prepare working message list and inject fresh runtime context once
     runtime_ctx = _build_runtime_date_context()
-    enriched_messages = []
+    working_messages: List[Dict[str, Any]] = []
     inserted = False
     for msg in messages:
         if not inserted and msg.get("role") == "system":
-            enriched_messages.append({
+            working_messages.append({
                 "role": "system",
                 "content": (msg.get("content") or "") + "\n\n" + runtime_ctx
             })
             inserted = True
         else:
-            enriched_messages.append(msg)
+            working_messages.append(msg)
     if not inserted:
-        enriched_messages.insert(0, {"role": "system", "content": runtime_ctx})
+        working_messages.insert(0, {"role": "system", "content": runtime_ctx})
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=enriched_messages,
-        tools=tools,
-        tool_choice="auto"
-    )
+    max_tool_rounds = 6
+    rounds = 0
 
-    assistant_message = response.choices[0].message
-
-    # Check if tool calls were made
-    if assistant_message.tool_calls:
-        tool_call = assistant_message.tool_calls[0]
-        function_name = tool_call.function.name
-        function_args = json.loads(tool_call.function.arguments or "{}")
-
-        # Execute the function
-        function_response = execute_function(function_name, function_args, cal_api)
-
-        # Add assistant message with tool call
-        messages.append({
-            "role": "assistant",
-            "content": assistant_message.content,
-            "tool_calls": [{
-                "id": tool_call.id,
-                "type": "function",
-                "function": {
-                    "name": function_name,
-                    "arguments": tool_call.function.arguments
-                }
-            }]
-        })
-
-        # Add tool response
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "name": function_name,
-            "content": function_response
-        })
-
-        # Get final response
-        # Also include runtime context for the second model turn
-        runtime_ctx_2 = _build_runtime_date_context()
-        enriched_messages_2 = []
-        inserted_2 = False
-        for msg in messages:
-            if not inserted_2 and msg.get("role") == "system":
-                enriched_messages_2.append({
-                    "role": "system",
-                    "content": (msg.get("content") or "") + "\n\n" + runtime_ctx_2
-                })
-                inserted_2 = True
-            else:
-                enriched_messages_2.append(msg)
-        if not inserted_2:
-            enriched_messages_2.insert(0, {"role": "system", "content": runtime_ctx_2})
-
-        second_response = client.chat.completions.create(
+    while True:
+        rounds += 1
+        response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=enriched_messages_2
+            messages=working_messages,
+            tools=tools,
+            tool_choice="auto",
         )
 
-        return second_response.choices[0].message.content, messages
+        assistant_message = response.choices[0].message
 
-    else:
-        return assistant_message.content, messages
+        # Convert assistant tool calls (possibly many) into our message format
+        tool_calls_payload = []
+        if getattr(assistant_message, "tool_calls", None):
+            for tc in assistant_message.tool_calls:
+                tool_calls_payload.append({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                })
+
+        # Append assistant message
+        working_messages.append({
+            "role": "assistant",
+            "content": assistant_message.content,
+            **({"tool_calls": tool_calls_payload} if tool_calls_payload else {}),
+        })
+
+        # If no tool calls, we are done
+        if not tool_calls_payload:
+            return assistant_message.content, working_messages
+
+        # Execute each tool call and append corresponding tool messages
+        for tc in assistant_message.tool_calls:
+            func_name = tc.function.name
+            func_args = json.loads(tc.function.arguments or "{}")
+            tool_result = execute_function(func_name, func_args, cal_api)
+            working_messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "name": func_name,
+                "content": tool_result,
+            })
+
+        # Safety: avoid infinite loops
+        if rounds >= max_tool_rounds:
+            fallback_msg = (assistant_message.content or "") + "\n\n(Reached tool-call limit. Please continue.)"
+            return fallback_msg.strip(), working_messages
 
 
 # Streamlit UI
