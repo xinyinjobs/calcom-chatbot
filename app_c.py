@@ -809,15 +809,64 @@ class CalComAPI:
             bookings = [b for b in bookings if booking_matches_attendee(b)]
 
             # Enrich with friendly fields and collect useful links
-            def first_url_from(booking_dict: Dict[str, Any], prefer: List[str]) -> Optional[str]:
-                # Prefer specific keys, else any field containing 'url' or 'link'
-                for key in prefer:
-                    if key in booking_dict and isinstance(booking_dict[key], str) and booking_dict[key].startswith("http"):
-                        return booking_dict[key]
-                for key, val in booking_dict.items():
-                    kl = key.lower()
-                    if ("url" in kl or "link" in kl) and isinstance(val, str) and val.startswith("http"):
-                        return val
+            def first_url_from(
+                booking_dict: Dict[str, Any],
+                prefer: List[str],
+                allow_generic_fallback: bool = False,
+            ) -> Optional[str]:
+                """Find a URL by preferred key names.
+
+                - Checks keys case-insensitively at top level first
+                - Then checks common nested containers like 'links', 'urls', etc.
+                - Optionally falls back to the first generic '*url*'/'*link*' it can find
+                """
+
+                def find_preferred(d: Dict[str, Any]) -> Optional[str]:
+                    if not isinstance(d, dict):
+                        return None
+                    lower_map: Dict[str, Any] = {str(k).lower(): v for k, v in d.items()}
+                    for key in prefer:
+                        v = lower_map.get(key.lower())
+                        if isinstance(v, str) and v.startswith("http"):
+                            return v
+                    return None
+
+                # Try preferred keys at top level
+                url = find_preferred(booking_dict)
+                if url:
+                    return url
+
+                # Try common containers
+                for container_key in ["links", "link", "urls", "url", "data"]:
+                    nested = booking_dict.get(container_key)
+                    if isinstance(nested, dict):
+                        url = find_preferred(nested)
+                        if url:
+                            return url
+
+                # Try shallow nested dicts
+                for _k, _v in booking_dict.items():
+                    if isinstance(_v, dict):
+                        url = find_preferred(_v)
+                        if url:
+                            return url
+
+                if allow_generic_fallback:
+                    # Generic fallback at top level
+                    for key, val in booking_dict.items():
+                        if isinstance(val, str):
+                            kl = str(key).lower()
+                            if ("url" in kl or "link" in kl) and val.startswith("http"):
+                                return val
+                    # Generic fallback inside shallow dicts
+                    for _k, _v in booking_dict.items():
+                        if isinstance(_v, dict):
+                            for k2, v2 in _v.items():
+                                if isinstance(v2, str):
+                                    kl2 = str(k2).lower()
+                                    if ("url" in kl2 or "link" in kl2) and v2.startswith("http"):
+                                        return v2
+
                 return None
 
             for booking in bookings:
@@ -845,15 +894,28 @@ class CalComAPI:
                 # Links
                 booking["booking_url"] = first_url_from(
                     booking,
-                    prefer=["bookingUrl", "eventPageUrl", "statusPageUrl", "booking_url"],
+                    prefer=[
+                        "meetingUrl",
+                        "joinUrl",
+                        "join_url",
+                        "bookingUrl",
+                        "eventPageUrl",
+                        "statusPageUrl",
+                        "booking_url",
+                        "meeting_link",
+                    ],
+                    allow_generic_fallback=False,
                 )
+                # For reschedule and cancel, do NOT fall back to generic URLs — only explicit links
                 booking["reschedule_url"] = first_url_from(
                     booking,
-                    prefer=["rescheduleUrl", "rescheduleLink"],
+                    prefer=["rescheduleUrl", "rescheduleLink", "reschedule"],
+                    allow_generic_fallback=False,
                 )
                 booking["cancel_url"] = first_url_from(
                     booking,
-                    prefer=["cancelUrl", "cancelLink"],
+                    prefer=["cancelUrl", "cancelLink", "cancel"],
+                    allow_generic_fallback=False,
                 )
 
             st.sidebar.success(f"✅ Found {len(bookings)} booking(s)")
@@ -865,17 +927,84 @@ class CalComAPI:
             st.sidebar.error(error_msg)
             return {"success": False, "error": error_msg, "bookings": []}
 
-    def cancel_booking(self, booking_uid: str, reason: str = "Cancelled by user") -> Dict[str, Any]:
-        """Cancel a booking by UID with v2-first strategy and v1 fallback."""
+    def _resolve_booking_uid(self, booking_uid: Optional[str] = None, booking_id: Optional[str] = None) -> Optional[str]:
+        """Resolve a booking UID from either a provided UID or a booking ID.
+
+        Tries v2/v1 direct fetch by ID, then scans current bookings as a fallback.
+        Returns a UID string if found; otherwise None.
+        """
+        # If caller already provided a UID-looking token, prefer it
+        if booking_uid:
+            return str(booking_uid)
+
+        if not booking_id:
+            return None
+
+        bid = str(booking_id)
+
+        # Try v2 direct fetch
         try:
-            st.sidebar.info(f"📤 Cancelling UID: {booking_uid}")
+            resp = self._make_request_with_retry(
+                "GET",
+                f"https://api.cal.com/v2/bookings/{bid}",
+                headers=self.headers,
+                timeout=15,
+                max_retries=2,
+            )
+            if resp.status_code < 400:
+                data = resp.json()
+                node = data.get("data", data) if isinstance(data, dict) else {}
+                if isinstance(node, dict):
+                    uid_val = node.get("uid") or node.get("bookingUid")
+                    if uid_val:
+                        return str(uid_val)
+        except Exception:
+            pass
+
+        # Try v1 direct fetch
+        try:
+            resp = self._make_request_with_retry(
+                "GET",
+                f"https://api.cal.com/v1/bookings/{bid}",
+                headers={"Content-Type": "application/json"},
+                params={"apiKey": self.api_key},
+                timeout=15,
+                max_retries=2,
+            )
+            if resp.status_code < 400:
+                data = resp.json()
+                node = data.get("data", data) if isinstance(data, dict) else {}
+                if isinstance(node, dict):
+                    uid_val = node.get("uid") or node.get("bookingUid")
+                    if uid_val:
+                        return str(uid_val)
+        except Exception:
+            pass
+
+        # Fallback: scan list of bookings for matching id
+        try:
+            all_bookings_resp = self.get_bookings()
+            for b in all_bookings_resp.get("bookings", []):
+                if str(b.get("id")) == bid and b.get("uid"):
+                    return str(b.get("uid"))
+        except Exception:
+            pass
+
+        return None
+
+    def cancel_booking(self, booking_uid: Optional[str] = None, booking_id: Optional[str] = None, reason: str = "Cancelled by user") -> Dict[str, Any]:
+        """Cancel a booking by UID or ID with v2-first strategy and v1 fallback."""
+        try:
+            resolved_uid = self._resolve_booking_uid(booking_uid, booking_id)
+            path_token = resolved_uid or (booking_uid or booking_id)
+            st.sidebar.info(f"📤 Cancelling booking: token={path_token}")
 
             # Try Cal.com v2 first (preferred)
             try:
                 st.sidebar.info("🔄 Trying Cal.com v2 API for cancellation...")
                 response = self._make_request_with_retry(
                     "POST",
-                    f"https://api.cal.com/v2/bookings/{booking_uid}/cancel",
+                    f"https://api.cal.com/v2/bookings/{path_token}/cancel",
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
@@ -902,7 +1031,7 @@ class CalComAPI:
                 # Fallback to Cal.com v1
                 response = self._make_request_with_retry(
                     "POST",
-                    f"https://api.cal.com/v1/bookings/{booking_uid}/cancel?apiKey={self.api_key}",
+                    f"https://api.cal.com/v1/bookings/{path_token}/cancel?apiKey={self.api_key}",
                     headers={
                         "Content-Type": "application/json",
                     },
@@ -917,7 +1046,8 @@ class CalComAPI:
                 error_details = {
                     "status_code": response.status_code,
                     "response_text": response.text,
-                    "booking_uid": booking_uid,
+                    "booking_uid": resolved_uid,
+                    "requested_token": path_token,
                     "api_version": "v2" if "/v2/" in response.url else "v1",
                 }
                 st.sidebar.error(
@@ -940,7 +1070,7 @@ class CalComAPI:
             st.sidebar.success("✅ Booking cancelled!")
             return {
                 "success": True,
-                "message": f"Booking {booking_uid} cancelled",
+                "message": f"Booking {path_token} cancelled",
                 "data": result_json.get("data", result_json),
             }
         except requests.exceptions.RequestException as e:
@@ -950,7 +1080,7 @@ class CalComAPI:
                 error_details = {
                     "status_code": e.response.status_code,
                     "response_text": e.response.text,
-                    "booking_uid": booking_uid,
+                    "booking_uid": resolved_uid if 'resolved_uid' in locals() else booking_uid,
                 }
                 error_msg += (
                     f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
@@ -959,9 +1089,11 @@ class CalComAPI:
             self._log_error("cancel_booking", error_msg, error_details)
             return {"success": False, "error": error_msg, "error_details": error_details}
 
-    def reschedule_booking(self, booking_uid: str, new_start_time: str, reason: str = "") -> Dict[str, Any]:
-        """Reschedule a booking with v2-first strategy and robust fallbacks."""
+    def reschedule_booking(self, booking_uid: Optional[str] = None, booking_id: Optional[str] = None, new_start_time: str = "", reason: str = "") -> Dict[str, Any]:
+        """Reschedule a booking by UID or ID with v2-first strategy and robust fallbacks."""
         try:
+            resolved_uid = self._resolve_booking_uid(booking_uid, booking_id)
+            path_token = resolved_uid or (booking_uid or booking_id)
             # Build a payload compatible with different API versions
             payload = {
                 "start": new_start_time,
@@ -972,7 +1104,7 @@ class CalComAPI:
                 payload["reschedulingReason"] = reason
                 payload["reason"] = reason
 
-            st.sidebar.info(f"📤 Rescheduling UID: {booking_uid} to {new_start_time}")
+            st.sidebar.info(f"📤 Rescheduling booking: token={path_token} to {new_start_time}")
 
             response = None
             error_stack = []
@@ -981,7 +1113,7 @@ class CalComAPI:
             try:
                 response = self._make_request_with_retry(
                     "PATCH",
-                    f"https://api.cal.com/v2/bookings/{booking_uid}",
+                    f"https://api.cal.com/v2/bookings/{path_token}",
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
@@ -1003,7 +1135,7 @@ class CalComAPI:
                 try:
                     response = self._make_request_with_retry(
                         "POST",
-                        f"https://api.cal.com/v2/bookings/{booking_uid}/reschedule",
+                        f"https://api.cal.com/v2/bookings/{path_token}/reschedule",
                         headers={
                             "Authorization": f"Bearer {self.api_key}",
                             "Content-Type": "application/json",
@@ -1024,7 +1156,7 @@ class CalComAPI:
                     # Final fallback: Cal.com v1 PATCH with apiKey query param
                     response = self._make_request_with_retry(
                         "PATCH",
-                        f"https://api.cal.com/v1/bookings/{booking_uid}",
+                        f"https://api.cal.com/v1/bookings/{path_token}",
                         headers={"Content-Type": "application/json"},
                         params={"apiKey": self.api_key},
                         json=payload,
@@ -1037,7 +1169,8 @@ class CalComAPI:
                         error_details = {
                             "status_code": response.status_code,
                             "response_text": response.text,
-                            "booking_uid": booking_uid,
+                            "booking_uid": resolved_uid,
+                            "requested_token": path_token,
                             "attempt_errors": error_stack,
                             "api_version": "v1",
                         }
@@ -1068,6 +1201,7 @@ class CalComAPI:
             st.sidebar.success("✅ Booking rescheduled!")
             return {
                 "success": True,
+                "message": f"Booking {path_token} rescheduled",
                 "data": result_json.get("data", result_json),
                 "api_version": "v2" if "/v2/" in response.url else "v1",
             }
@@ -1078,7 +1212,7 @@ class CalComAPI:
                 error_details = {
                     "status_code": e.response.status_code,
                     "response_text": e.response.text,
-                    "booking_uid": booking_uid,
+                    "booking_uid": resolved_uid if 'resolved_uid' in locals() else booking_uid,
                 }
                 error_msg += (
                     f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
@@ -1173,14 +1307,15 @@ tools = [
         "type": "function",
         "function": {
             "name": "cancel_booking",
-            "description": "Cancel a booking using its UID (string). First get bookings to find the UID.",
+            "description": "Cancel a booking using its UID or booking ID.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "booking_uid": {"type": "string", "description": "The booking UID"},
+                    "booking_uid": {"type": "string", "description": "The booking UID (preferred)"},
+                    "booking_id": {"type": "string", "description": "The numeric booking ID (alternative)"},
                     "reason": {"type": "string"}
                 },
-                "required": ["booking_uid"]
+                "required": []
             }
         }
     },
@@ -1188,15 +1323,16 @@ tools = [
         "type": "function",
         "function": {
             "name": "reschedule_booking",
-            "description": "Reschedule a booking using its UID (string). First get bookings to find the UID.",
+            "description": "Reschedule a booking using its UID or booking ID.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "booking_uid": {"type": "string", "description": "The booking UID"},
+                    "booking_uid": {"type": "string", "description": "The booking UID (preferred)"},
+                    "booking_id": {"type": "string", "description": "The numeric booking ID (alternative)"},
                     "new_start_time": {"type": "string", "description": "ISO format"},
                     "reason": {"type": "string"}
                 },
-                "required": ["booking_uid", "new_start_time"]
+                "required": ["new_start_time"]
             }
         }
     }
@@ -1499,14 +1635,16 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
 
     elif function_name == "cancel_booking":
         result = cal_api.cancel_booking(
-            booking_uid=arguments["booking_uid"],
+            booking_uid=arguments.get("booking_uid"),
+            booking_id=arguments.get("booking_id"),
             reason=arguments.get("reason", "Cancelled by user")
         )
         return json.dumps(result)
 
     elif function_name == "reschedule_booking":
         result = cal_api.reschedule_booking(
-            booking_uid=arguments["booking_uid"],
+            booking_uid=arguments.get("booking_uid"),
+            booking_id=arguments.get("booking_id"),
             new_start_time=arguments["new_start_time"],
             reason=arguments.get("reason", "")
         )
