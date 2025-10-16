@@ -718,33 +718,130 @@ class CalComAPI:
                 "error_details": error_details
             }
 
-    def get_bookings(self, attendee_email: Optional[str] = None) -> Dict[str, Any]:
-        """Get all bookings"""
+    def get_bookings(self, attendee_email: Optional[str] = None, attendee_name: Optional[str] = None) -> Dict[str, Any]:
+        """Get bookings with optional filtering by attendee email or name, and include useful links."""
         try:
             params = {}
             if attendee_email:
                 params["attendeeEmail"] = attendee_email
 
-            st.sidebar.info(f"📤 Fetching bookings: {params}")
-            response = requests.get(
-                f"https://api.cal.com/v1/bookings?apiKey={self.api_key}",
-                headers=self.headers, 
-                params=params, 
-                timeout=15
-            )
-            
-            st.sidebar.info(f"📥 Response: {response.status_code}")
-            response.raise_for_status()
-            data = response.json()
-            bookings = data.get("data", [])
+            st.sidebar.info(f"📤 Fetching bookings (filters: {params if params else 'none'})")
 
-            # Format times and add UIDs
+            # Try v2 API first with retry/backoff
+            try:
+                response = self._make_request_with_retry(
+                    "GET",
+                    "https://api.cal.com/v2/bookings",
+                    headers=self.headers,
+                    params=params,
+                    timeout=15,
+                    max_retries=2,
+                )
+                st.sidebar.info(f"📥 V2 Bookings Response: {response.status_code}")
+                if response.status_code >= 400:
+                    raise requests.exceptions.HTTPError(f"V2 API returned {response.status_code}")
+            except Exception as v2_error:
+                st.sidebar.warning(f"V2 bookings failed ({v2_error}), trying v1...")
+                response = self._make_request_with_retry(
+                    "GET",
+                    f"https://api.cal.com/v1/bookings",
+                    headers={"Content-Type": "application/json"},
+                    params={**params, "apiKey": self.api_key},
+                    timeout=15,
+                    max_retries=2,
+                )
+                st.sidebar.info(f"📥 V1 Bookings Response: {response.status_code}")
+
+            response.raise_for_status()
+            raw = response.json()
+
+            # Parse flexible shapes
+            bookings: List[Dict[str, Any]] = []
+            if isinstance(raw, list):
+                bookings = raw
+            elif isinstance(raw, dict):
+                if isinstance(raw.get("data"), list):
+                    bookings = raw.get("data", [])
+                elif isinstance(raw.get("data"), dict) and isinstance(raw["data"].get("bookings"), list):
+                    bookings = raw["data"].get("bookings", [])
+                elif isinstance(raw.get("bookings"), list):
+                    bookings = raw.get("bookings", [])
+                else:
+                    # Last resort: look for an array value in dict
+                    for v in raw.values():
+                        if isinstance(v, list) and v and isinstance(v[0], dict):
+                            bookings = v
+                            break
+
+            # Optional client-side filtering by attendee name/email
+            def booking_matches_attendee(b: Dict[str, Any]) -> bool:
+                if not attendee_email and not attendee_name:
+                    return True
+                possible_attendees = b.get("attendees") or b.get("attendee") or []
+                if isinstance(possible_attendees, dict):
+                    possible_attendees = [possible_attendees]
+                for a in possible_attendees:
+                    a_email = str(a.get("email", "")).lower()
+                    a_name = str(a.get("name", "")).lower()
+                    if attendee_email and a_email == attendee_email.lower():
+                        return True
+                    if attendee_name:
+                        name_q = attendee_name.lower()
+                        if a_name == name_q or name_q in a_name:
+                            return True
+                return False
+
+            bookings = [b for b in bookings if booking_matches_attendee(b)]
+
+            # Enrich with friendly fields and collect useful links
+            def first_url_from(booking_dict: Dict[str, Any], prefer: List[str]) -> Optional[str]:
+                # Prefer specific keys, else any field containing 'url' or 'link'
+                for key in prefer:
+                    if key in booking_dict and isinstance(booking_dict[key], str) and booking_dict[key].startswith("http"):
+                        return booking_dict[key]
+                for key, val in booking_dict.items():
+                    kl = key.lower()
+                    if ("url" in kl or "link" in kl) and isinstance(val, str) and val.startswith("http"):
+                        return val
+                return None
+
             for booking in bookings:
+                # Times and UID
                 if "start" in booking:
                     booking["start_pst"] = format_time_pst(booking["start"])
-                booking["display_uid"] = booking.get("uid", "N/A")
+                booking["display_uid"] = booking.get("uid") or booking.get("id", "N/A")
 
-            st.sidebar.success(f"✅ Found {len(bookings)} bookings")
+                # Attendee primary
+                attendees = booking.get("attendees") or booking.get("attendee") or []
+                if isinstance(attendees, dict):
+                    attendees = [attendees]
+                primary = None
+                if attendee_email:
+                    for a in attendees:
+                        if str(a.get("email", "")).lower() == attendee_email.lower():
+                            primary = a
+                            break
+                if primary is None and attendees:
+                    primary = attendees[0]
+                if isinstance(primary, dict):
+                    booking["primary_attendee_email"] = primary.get("email")
+                    booking["primary_attendee_name"] = primary.get("name")
+
+                # Links
+                booking["booking_url"] = first_url_from(
+                    booking,
+                    prefer=["bookingUrl", "eventPageUrl", "statusPageUrl", "booking_url"],
+                )
+                booking["reschedule_url"] = first_url_from(
+                    booking,
+                    prefer=["rescheduleUrl", "rescheduleLink"],
+                )
+                booking["cancel_url"] = first_url_from(
+                    booking,
+                    prefer=["cancelUrl", "cancelLink"],
+                )
+
+            st.sidebar.success(f"✅ Found {len(bookings)} booking(s)")
             return {"success": True, "bookings": bookings, "count": len(bookings)}
         except requests.exceptions.RequestException as e:
             error_msg = f"❌ Failed to get bookings: {str(e)}"
@@ -873,11 +970,12 @@ tools = [
         "type": "function",
         "function": {
             "name": "get_bookings",
-            "description": "Get all bookings. Always show the booking UID in your response.",
+            "description": "Get all bookings. Always show the booking UID and booking link in your response if available.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "attendee_email": {"type": "string"}
+                    "attendee_email": {"type": "string"},
+                    "attendee_name": {"type": "string"}
                 },
                 "required": []
             }
@@ -1205,7 +1303,10 @@ def execute_function(function_name: str, arguments: Dict[str, Any], cal_api: Cal
         return json.dumps(result)
 
     elif function_name == "get_bookings":
-        result = cal_api.get_bookings(arguments.get("attendee_email"))
+        result = cal_api.get_bookings(
+            attendee_email=arguments.get("attendee_email"),
+            attendee_name=arguments.get("attendee_name")
+        )
         return json.dumps(result)
 
     elif function_name == "cancel_booking":
@@ -1335,6 +1436,11 @@ def main():
             "Your Email", 
             placeholder="user@example.com", 
             help="Your email for booking management"
+        )
+        attendee_name = st.text_input(
+            "Attendee Name (optional)",
+            placeholder="Enter a name to filter scheduled events",
+            help="Use either email or name to filter scheduled events"
         )
         
         st.markdown("---")
@@ -1546,7 +1652,9 @@ When booking:
 
 When listing bookings:
 - ALWAYS show the booking UID for each meeting
-- Format: "Meeting at [time] (UID: [uid])"
+- Include attendee email/name if available
+- If booking_url is available, show it as a link
+- Format suggestion: "[start_pst] — [primary_attendee_email or name] — UID: [uid] — [booking_url]"
 
 For cancel/reschedule:
 1. First call get_bookings to get UIDs
@@ -1567,6 +1675,62 @@ Be conversational and helpful!"""
         return
 
     cal_api = CalComAPI(calcom_key)
+
+    # Scheduled Events UI
+    st.markdown("---")
+    st.subheader("📆 Scheduled Events")
+    st.caption("Filter by your email or attendee name. Shows booking links when available.")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        fetch_btn = st.button("🔄 Refresh Events")
+    with col_b:
+        show_all_btn = st.button("Show All Events")
+
+    if fetch_btn or show_all_btn:
+        email_filter = (user_email or "").strip()
+        name_filter = (attendee_name or "").strip()
+        try:
+            result = cal_api.get_bookings(
+                attendee_email=None if show_all_btn else (email_filter or None),
+                attendee_name=None if show_all_btn else (name_filter or None),
+            )
+        except Exception as e:
+            result = {"success": False, "error": str(e), "bookings": []}
+
+        if result.get("success") and result.get("count", 0) > 0:
+            bookings = result.get("bookings", [])
+            st.success(f"Found {len(bookings)} scheduled event(s)")
+            for b in bookings:
+                start_text = b.get("start_pst") or b.get("start") or ""
+                uid = b.get("display_uid") or b.get("uid") or b.get("id") or "N/A"
+                pa_email = b.get("primary_attendee_email") or ""
+                pa_name = b.get("primary_attendee_name") or ""
+                who = pa_email or pa_name or "(no attendee)"
+                booking_url = b.get("booking_url")
+                reschedule_url = b.get("reschedule_url")
+                cancel_url = b.get("cancel_url")
+
+                parts = [f"{start_text}", f"UID: `{uid}`"]
+                if who:
+                    parts.insert(1, who)
+                line = " — ".join(parts)
+                st.markdown(line)
+                links = []
+                if booking_url:
+                    links.append(f"[Open]({booking_url})")
+                if reschedule_url:
+                    links.append(f"[Reschedule]({reschedule_url})")
+                if cancel_url:
+                    links.append(f"[Cancel]({cancel_url})")
+                if links:
+                    st.markdown(" ".join(links))
+                st.markdown("---")
+        else:
+            err = result.get("error")
+            if err:
+                st.error(f"Failed to fetch bookings: {err}")
+            else:
+                st.info("No scheduled events found for the given filters.")
 
     # Display chat messages
     for message in st.session_state.messages:
