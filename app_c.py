@@ -1660,33 +1660,33 @@ class CalComAPI:
         return results
     
     
-    # Add this button to your sidebar in main():
-    # Place this in the sidebar section where you have other diagnostic buttons
-    
-    if self.api_key and st.button("🔬 Diagnose Slots Issue"):
-        with st.spinner("Running diagnostics..."):
-            cal_api = CalComAPI(self.api_key)
-            
-            # Get event type ID
-            event_id = safe_get_session_state('manual_event_id')
-            if not event_id:
-                # Try to get first available event type
-                evt_result = cal_api.get_event_types()
-                if evt_result.get("success") and evt_result.get("event_types"):
-                    event_id = evt_result["event_types"][0].get("id")
-                    st.sidebar.info(f"Using first available event type: {event_id}")
-                else:
-                    st.sidebar.error("No event type found. Please set event type ID manually.")
-                    st.stop()
-            
-            # Run diagnostics
-            from datetime import datetime, timedelta
-            tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-            
-            results = cal_api.diagnose_slots_issue(event_id, tomorrow)
-            
-            # Show detailed results
-            st.sidebar.json(results)
+        # Add this button to your sidebar in main():
+        # Place this in the sidebar section where you have other diagnostic buttons
+        
+        if self.api_key and st.button("🔬 Diagnose Slots Issue"):
+            with st.spinner("Running diagnostics..."):
+                cal_api = CalComAPI(self.api_key)
+                
+                # Get event type ID
+                event_id = safe_get_session_state('manual_event_id')
+                if not event_id:
+                    # Try to get first available event type
+                    evt_result = cal_api.get_event_types()
+                    if evt_result.get("success") and evt_result.get("event_types"):
+                        event_id = evt_result["event_types"][0].get("id")
+                        st.sidebar.info(f"Using first available event type: {event_id}")
+                    else:
+                        st.sidebar.error("No event type found. Please set event type ID manually.")
+                        st.stop()
+                
+                # Run diagnostics
+                from datetime import datetime, timedelta
+                tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+                
+                results = cal_api.diagnose_slots_issue(event_id, tomorrow)
+                
+                # Show detailed results
+                st.sidebar.json(results)
             
 # OpenAI function definitions
 tools = [
