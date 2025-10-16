@@ -998,7 +998,7 @@ class CalComAPI:
             resolved_uid = self._resolve_booking_uid(booking_uid, booking_id)
             path_token = resolved_uid or (booking_uid or booking_id)
             st.sidebar.info(f"📤 Cancelling booking: token={path_token}")
-
+    
             # Try Cal.com v2 first (preferred)
             try:
                 st.sidebar.info("🔄 Trying Cal.com v2 API for cancellation...")
@@ -1011,36 +1011,50 @@ class CalComAPI:
                         "cal-api-version": "2024-08-13",
                     },
                     json={
-                        # Include both common keys to maximize compatibility across versions
-                        "cancellationReason": reason,
-                        "reason": reason,
+                        "cancellationReason": reason,  # ✅ Only use cancellationReason for v2
                     },
                     timeout=15,
                     max_retries=2,
                 )
                 st.sidebar.info(f"📥 V2 cancel status: {response.status_code}")
-
-                if response.status_code >= 400:
-                    raise requests.exceptions.HTTPError(
-                        f"V2 API returned {response.status_code}"
-                    )
-            except Exception as v2_error:
-                st.sidebar.warning(
-                    f"V2 cancel failed ({str(v2_error)}), trying v1..."
-                )
+    
+                # Don't retry on 4xx errors - these are client errors
+                if 400 <= response.status_code < 500:
+                    error_details = {
+                        "status_code": response.status_code,
+                        "response_text": response.text,
+                        "booking_uid": resolved_uid,
+                        "requested_token": path_token,
+                        "api_version": "v2",
+                    }
+                    st.sidebar.error(f"❌ Client error {response.status_code}: {response.text[:200]}")
+                    self._log_error("cancel_booking", "Client error - check booking UID", error_details)
+                    return {
+                        "success": False,
+                        "error": f"Cannot cancel booking: {response.text[:500]}",
+                        "error_details": error_details,
+                        "suggestion": "Check that the booking UID is correct and the booking exists"
+                    }
+    
+                if response.status_code >= 500:
+                    raise requests.exceptions.HTTPError(f"V2 API returned {response.status_code}")
+                    
+            except requests.exceptions.HTTPError as v2_error:
+                st.sidebar.warning(f"V2 cancel failed ({str(v2_error)}), trying v1...")
                 # Fallback to Cal.com v1
                 response = self._make_request_with_retry(
-                    "POST",
-                    f"https://api.cal.com/v1/bookings/{path_token}/cancel?apiKey={self.api_key}",
-                    headers={
-                        "Content-Type": "application/json",
+                    "DELETE",  # ✅ V1 uses DELETE, not POST
+                    f"https://api.cal.com/v1/bookings/{path_token}",
+                    headers={"Content-Type": "application/json"},
+                    params={
+                        "apiKey": self.api_key,
+                        "cancellationReason": reason
                     },
-                    json={"cancellationReason": reason},
                     timeout=15,
                     max_retries=2,
                 )
                 st.sidebar.info(f"📥 V1 cancel status: {response.status_code}")
-
+    
             # Handle error responses with richer details
             if response.status_code >= 400:
                 error_details = {
@@ -1050,9 +1064,7 @@ class CalComAPI:
                     "requested_token": path_token,
                     "api_version": "v2" if "/v2/" in response.url else "v1",
                 }
-                st.sidebar.error(
-                    f"❌ Cancellation failed with status {response.status_code}"
-                )
+                st.sidebar.error(f"❌ Cancellation failed with status {response.status_code}")
                 st.sidebar.code(json.dumps(error_details, indent=2), language="json")
                 self._log_error("cancel_booking", "Cancellation failed", error_details)
                 return {
@@ -1060,7 +1072,7 @@ class CalComAPI:
                     "error": f"Cancellation failed: {response.text[:500]}",
                     "error_details": error_details,
                 }
-
+    
             # Success
             response.raise_for_status()
             try:
@@ -1082,38 +1094,33 @@ class CalComAPI:
                     "response_text": e.response.text,
                     "booking_uid": resolved_uid if 'resolved_uid' in locals() else booking_uid,
                 }
-                error_msg += (
-                    f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
-                )
+                error_msg += f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
             st.sidebar.error(error_msg)
             self._log_error("cancel_booking", error_msg, error_details)
             return {"success": False, "error": error_msg, "error_details": error_details}
-
+    
+    
     def reschedule_booking(self, booking_uid: Optional[str] = None, booking_id: Optional[str] = None, new_start_time: str = "", reason: str = "") -> Dict[str, Any]:
-        """Reschedule a booking by UID or ID with v2-first strategy and robust fallbacks."""
+        """Reschedule a booking by UID or ID with v2-first strategy and cancel+create fallback."""
         try:
             resolved_uid = self._resolve_booking_uid(booking_uid, booking_id)
             path_token = resolved_uid or (booking_uid or booking_id)
-            # Build a payload compatible with different API versions
+            
+            # Build payload compatible with v2 API
             payload = {
                 "start": new_start_time,
-                # Include alternate key for compatibility
-                "startTime": new_start_time,
             }
             if reason:
                 payload["reschedulingReason"] = reason
-                payload["reason"] = reason
-
+    
             st.sidebar.info(f"📤 Rescheduling booking: token={path_token} to {new_start_time}")
-
-            response = None
-            error_stack = []
-
-            # Try Cal.com v2 PATCH first
+    
+            # Try Cal.com v2 POST /reschedule endpoint (correct method!)
             try:
+                st.sidebar.info("🔄 Trying Cal.com v2 API reschedule endpoint...")
                 response = self._make_request_with_retry(
-                    "PATCH",
-                    f"https://api.cal.com/v2/bookings/{path_token}",
+                    "POST",  # ✅ CORRECT: v2 uses POST, not PATCH
+                    f"https://api.cal.com/v2/bookings/{path_token}/reschedule",  # ✅ CORRECT endpoint
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
@@ -1123,88 +1130,123 @@ class CalComAPI:
                     timeout=15,
                     max_retries=2,
                 )
-                st.sidebar.info(f"📥 V2 PATCH status: {response.status_code}")
-                if response.status_code >= 400:
-                    raise requests.exceptions.HTTPError(
-                        f"V2 PATCH returned {response.status_code}"
-                    )
-            except Exception as v2_patch_err:
-                error_stack.append(f"v2 PATCH failed: {str(v2_patch_err)}")
-                st.sidebar.warning(f"🔄 {error_stack[-1]} — trying v2 POST /reschedule...")
-                # Try Cal.com v2 explicit reschedule endpoint as a fallback
+                st.sidebar.info(f"📥 V2 POST /reschedule status: {response.status_code}")
+                
+                # Don't retry on 4xx errors
+                if 400 <= response.status_code < 500:
+                    error_details = {
+                        "status_code": response.status_code,
+                        "response_text": response.text,
+                        "booking_uid": resolved_uid,
+                        "requested_token": path_token,
+                        "api_version": "v2",
+                    }
+                    st.sidebar.error(f"❌ Client error {response.status_code}: {response.text[:200]}")
+                    self._log_error("reschedule_booking", "Client error", error_details)
+                    return {
+                        "success": False,
+                        "error": f"Cannot reschedule: {response.text[:500]}",
+                        "error_details": error_details,
+                        "suggestion": "Check that the booking UID is correct and the new time is available"
+                    }
+                
+                if response.status_code >= 500:
+                    raise requests.exceptions.HTTPError(f"V2 POST /reschedule returned {response.status_code}")
+                    
+            except requests.exceptions.HTTPError as v2_err:
+                st.sidebar.warning(f"🔄 V2 reschedule failed: {str(v2_err)}")
+                st.sidebar.info("📝 Trying v1 approach: cancel + create new booking...")
+                
+                # V1 doesn't have a reschedule endpoint - need to cancel + create
+                # First, get the original booking details
                 try:
-                    response = self._make_request_with_retry(
-                        "POST",
-                        f"https://api.cal.com/v2/bookings/{path_token}/reschedule",
-                        headers={
-                            "Authorization": f"Bearer {self.api_key}",
-                            "Content-Type": "application/json",
-                            "cal-api-version": "2024-08-13",
-                        },
-                        json=payload,
-                        timeout=15,
-                        max_retries=2,
+                    booking_resp = self.get_bookings()
+                    if not booking_resp.get("success"):
+                        raise Exception("Could not fetch booking details for v1 reschedule")
+                    
+                    # Find the booking to reschedule
+                    original_booking = None
+                    for b in booking_resp.get("bookings", []):
+                        if b.get("uid") == path_token or str(b.get("id")) == path_token:
+                            original_booking = b
+                            break
+                    
+                    if not original_booking:
+                        raise Exception(f"Could not find booking {path_token}")
+                    
+                    # Extract details needed for new booking
+                    event_type_id = original_booking.get("eventTypeId")
+                    attendees = original_booking.get("attendees", [])
+                    if not attendees:
+                        raise Exception("No attendees found in original booking")
+                    
+                    attendee = attendees[0]
+                    attendee_email = attendee.get("email")
+                    attendee_name = attendee.get("name")
+                    
+                    # Cancel the old booking
+                    cancel_result = self.cancel_booking(
+                        booking_uid=path_token,
+                        reason=reason or "Rescheduling to new time"
                     )
-                    st.sidebar.info(f"📥 V2 POST /reschedule status: {response.status_code}")
-                    if response.status_code >= 400:
-                        raise requests.exceptions.HTTPError(
-                            f"V2 POST /reschedule returned {response.status_code}"
-                        )
-                except Exception as v2_post_err:
-                    error_stack.append(f"v2 POST /reschedule failed: {str(v2_post_err)}")
-                    st.sidebar.warning(f"🔄 {error_stack[-1]} — falling back to v1 PATCH...")
-                    # Final fallback: Cal.com v1 PATCH with apiKey query param
-                    response = self._make_request_with_retry(
-                        "PATCH",
-                        f"https://api.cal.com/v1/bookings/{path_token}",
-                        headers={"Content-Type": "application/json"},
-                        params={"apiKey": self.api_key},
-                        json=payload,
-                        timeout=15,
-                        max_retries=2,
+                    
+                    if not cancel_result.get("success"):
+                        raise Exception(f"Failed to cancel original booking: {cancel_result.get('error')}")
+                    
+                    st.sidebar.info("✅ Original booking cancelled, creating new booking...")
+                    
+                    # Create new booking
+                    new_booking_result = self.create_booking(
+                        event_type_id=event_type_id,
+                        start_time=new_start_time,
+                        attendee_email=attendee_email,
+                        attendee_name=attendee_name,
+                        meeting_reason=reason or "Rescheduled meeting"
                     )
-                    st.sidebar.info(f"📥 V1 PATCH status: {response.status_code}")
-                    if response.status_code >= 400:
-                        # All attempts failed; construct aggregated error
-                        error_details = {
-                            "status_code": response.status_code,
-                            "response_text": response.text,
-                            "booking_uid": resolved_uid,
-                            "requested_token": path_token,
-                            "attempt_errors": error_stack,
-                            "api_version": "v1",
-                        }
-                        st.sidebar.error(
-                            f"❌ Reschedule failed with status {response.status_code}"
-                        )
-                        st.sidebar.code(
-                            json.dumps(error_details, indent=2), language="json"
-                        )
-                        self._log_error(
-                            "reschedule_booking",
-                            "Reschedule failed after fallbacks",
-                            error_details,
-                        )
-                        return {
-                            "success": False,
-                            "error": f"Reschedule failed: {response.text[:500]}",
-                            "error_details": error_details,
-                        }
-
-            # If we reach here, we have a non-error response
+                    
+                    if not new_booking_result.get("success"):
+                        # Uh oh - we cancelled but couldn't create new one
+                        st.sidebar.error("⚠️ WARNING: Cancelled old booking but failed to create new one!")
+                        raise Exception(f"Failed to create new booking: {new_booking_result.get('error')}")
+                    
+                    st.sidebar.success("✅ Successfully rescheduled via cancel + create!")
+                    return {
+                        "success": True,
+                        "message": f"Booking rescheduled (via cancel + create)",
+                        "data": new_booking_result.get("data", {}),
+                        "api_version": "v1-cancel-create",
+                        "new_booking_uid": new_booking_result.get("booking_uid"),
+                    }
+                    
+                except Exception as v1_error:
+                    error_details = {
+                        "error": str(v1_error),
+                        "booking_uid": resolved_uid,
+                        "requested_token": path_token,
+                    }
+                    st.sidebar.error(f"❌ V1 cancel+create approach failed: {str(v1_error)}")
+                    self._log_error("reschedule_booking", "V1 fallback failed", error_details)
+                    return {
+                        "success": False,
+                        "error": f"Reschedule failed on both v2 and v1: {str(v1_error)}",
+                        "error_details": error_details,
+                    }
+    
+            # If we reach here, v2 succeeded
             response.raise_for_status()
             try:
                 result_json = response.json()
             except Exception:
                 result_json = {}
-
+    
             st.sidebar.success("✅ Booking rescheduled!")
             return {
                 "success": True,
                 "message": f"Booking {path_token} rescheduled",
                 "data": result_json.get("data", result_json),
-                "api_version": "v2" if "/v2/" in response.url else "v1",
+                "api_version": "v2",
             }
+            
         except requests.exceptions.RequestException as e:
             error_msg = f"❌ Failed to reschedule: {str(e)}"
             error_details: Dict[str, Any] = {}
@@ -1214,13 +1256,10 @@ class CalComAPI:
                     "response_text": e.response.text,
                     "booking_uid": resolved_uid if 'resolved_uid' in locals() else booking_uid,
                 }
-                error_msg += (
-                    f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
-                )
+                error_msg += f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
             st.sidebar.error(error_msg)
             self._log_error("reschedule_booking", error_msg, error_details)
             return {"success": False, "error": error_msg, "error_details": error_details}
-
 
 # OpenAI function definitions
 tools = [
