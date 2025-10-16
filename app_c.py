@@ -11,6 +11,7 @@ try:
 except Exception:  # pragma: no cover
     pytz_timezone = None  # type: ignore
 from typing import Optional, List, Dict, Any
+import re
 import requests
 from openai import OpenAI
 import streamlit as st
@@ -95,6 +96,95 @@ def _build_runtime_date_context() -> str:
         f"UTC {utc_now.strftime('%Y-%m-%d %H:%M')} UTC"
     )
     return today_line + "\n" + time_line + "\nAlways interpret relative dates from this context."
+
+
+def _coerce_or_parse_to_utc_iso(start_time_raw: str) -> str:
+    """Return an ISO UTC (..Z) string from a variety of inputs.
+
+    Accepted inputs:
+    - ISO 8601 with or without Z (e.g., 2025-10-16T19:30:00Z or 2025-10-16T19:30:00+00:00)
+    - "YYYY-MM-DD HH:MM" interpreted in America/Los_Angeles
+    - Natural phrases with LA-relative date keywords like "today"/"tomorrow",
+      including times like "12:30 PM PDT tomorrow", "tomorrow 9am", "12:30pm".
+
+    Raises ValueError if cannot parse.
+    """
+    s = (start_time_raw or "").strip()
+    if not s:
+        raise ValueError("start_time is empty")
+
+    la = _get_tz("America/Los_Angeles")
+    utc = _get_tz("UTC")
+
+    # 1) Try strict ISO first
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        dt_utc = dt.astimezone(utc)
+        return dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        pass
+
+    # 2) Try "YYYY-MM-DD HH:MM" in LA
+    for fmt in ("%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M"):
+        try:
+            local_dt = _localize_naive(datetime.strptime(s, fmt), la)
+            return local_dt.astimezone(utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:
+            pass
+
+    # 3) Natural phrases like "12:30 PM PDT tomorrow"
+    s_lower = s.lower()
+    # Remove common filler words and timezone nicknames; we always interpret in LA
+    s_lower = re.sub(r"\b(at|on|in)\b", " ", s_lower)
+    s_lower = re.sub(r"\b(pdt|pst|pt|pacific|america/los_angeles)\b", " ", s_lower)
+    s_lower = re.sub(r"\s+", " ", s_lower).strip()
+
+    # Determine date
+    base_la = _get_effective_la_now().date()
+    target_date = None
+    if "tomorrow" in s_lower:
+        target_date = base_la + timedelta(days=1)
+        s_lower = s_lower.replace("tomorrow", " ")
+    elif "today" in s_lower:
+        target_date = base_la
+        s_lower = s_lower.replace("today", " ")
+    else:
+        m_date = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", s_lower)
+        if m_date:
+            y, mo, d = map(int, m_date.groups())
+            target_date = datetime(y, mo, d).date()
+            # remove matched date from string
+            s_lower = s_lower.replace(m_date.group(0), " ")
+    if target_date is None:
+        # If no explicit date, default to base date; if time already passed today, choose tomorrow
+        target_date = base_la
+
+    # Determine time (supports "12:30 pm", "9am", "09:00", "12:30pm")
+    m_time = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", s_lower)
+    if not m_time:
+        raise ValueError(f"Could not find a time in '{start_time_raw}'")
+
+    hour = int(m_time.group(1))
+    minute = int(m_time.group(2) or 0)
+    ampm = (m_time.group(3) or "").lower()
+
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise ValueError("Invalid time components")
+
+    if ampm == "pm" and hour != 12:
+        hour += 12
+    elif ampm == "am" and hour == 12:
+        hour = 0
+
+    # Compose LA datetime and convert to UTC
+    local_dt = _localize_naive(datetime(target_date.year, target_date.month, target_date.day, hour, minute), la)
+    # If the chosen time is already in the past relative to now, and date wasn't explicitly provided,
+    # roll forward to tomorrow to honor intent like "today 9am" entered after 9am.
+    if "tomorrow" not in s.lower() and re.search(r"\b(today)\b", s.lower(), re.I) is None:
+        if local_dt < _get_effective_la_now():
+            local_dt = local_dt + timedelta(days=1)
+
+    return local_dt.astimezone(utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def get_booking_status(booking: Dict[str, Any]) -> tuple[str, str, str]:
     """
@@ -681,9 +771,16 @@ class CalComAPI:
             self._processing_bookings.add(booking_key)
             
             try:
+                # Coerce start time to ISO UTC if needed (handles phrases like "12:30 PM PDT tomorrow")
+                try:
+                    iso_start_time = _coerce_or_parse_to_utc_iso(start_time)
+                except Exception as parse_err:
+                    st.sidebar.error(f"❌ Invalid start_time: {start_time} -> {parse_err}")
+                    return {"success": False, "error": f"Invalid start_time: {parse_err}"}
+
                 payload = {
                     "eventTypeId": event_type_id,
-                    "start": start_time,
+                    "start": iso_start_time,
                     "attendee": {
                         "name": attendee_name,
                         "email": attendee_email,
