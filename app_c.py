@@ -265,18 +265,16 @@ class CalComAPI:
                 }
                 st.sidebar.error(f"❌ Event types fetch failed with status {response.status_code}")
                 st.sidebar.code(json.dumps(error_details, indent=2), language="json")
-            else:
-                error_details = {}
-            # Log the error
-            self._log_error("get_event_types", f"API returned {response.status_code}", error_details)
+                # Log and return failure
+                self._log_error("get_event_types", f"API returned {response.status_code}", error_details)
+                return {
+                    "success": False,
+                    "error": f"Failed to fetch event types: {response.text}",
+                    "error_details": error_details,
+                    "event_types": []
+                }
             
-            return {
-                "success": False, 
-                "error": f"Failed to fetch event types: {response.text}",
-                "error_details": error_details,
-                "event_types": []
-            }
-            
+            # Success: parse response
             response.raise_for_status()
             data = response.json()
             
@@ -287,14 +285,31 @@ class CalComAPI:
             event_types = []
             
             # Structure 1: {data: [...]}
-            if "data" in data:
-                event_types = data["data"] if isinstance(data["data"], list) else []
+            if isinstance(data, dict) and "data" in data:
+                if isinstance(data["data"], list):
+                    event_types = data["data"]
+                elif isinstance(data["data"], dict):
+                    inner = data["data"]
+                    # Common nested keys
+                    for key in ("event_types", "eventTypes", "items"):
+                        if key in inner and isinstance(inner[key], list):
+                            event_types = inner[key]
+                            break
             # Structure 2: {event_types: [...]}
-            elif "event_types" in data:
+            if not event_types and isinstance(data, dict) and "event_types" in data:
                 event_types = data["event_types"] if isinstance(data["event_types"], list) else []
-            # Structure 3: direct array
-            elif isinstance(data, list):
+            # Structure 3: {eventTypes: [...]}
+            if not event_types and isinstance(data, dict) and "eventTypes" in data:
+                event_types = data["eventTypes"] if isinstance(data["eventTypes"], list) else []
+            # Structure 4: direct array
+            if not event_types and isinstance(data, list):
                 event_types = data
+            # Structure 5: fallback - find first list of dicts
+            if not event_types and isinstance(data, dict):
+                for v in data.values():
+                    if isinstance(v, list) and v and isinstance(v[0], dict):
+                        event_types = v
+                        break
 
             if event_types:
                 st.sidebar.success(f"✅ Found {len(event_types)} event types")
@@ -945,31 +960,132 @@ class CalComAPI:
             return {"success": False, "error": error_msg, "error_details": error_details}
 
     def reschedule_booking(self, booking_uid: str, new_start_time: str, reason: str = "") -> Dict[str, Any]:
-        """Reschedule a booking"""
+        """Reschedule a booking with v2-first strategy and robust fallbacks."""
         try:
-            payload = {"start": new_start_time}
+            # Build a payload compatible with different API versions
+            payload = {
+                "start": new_start_time,
+                # Include alternate key for compatibility
+                "startTime": new_start_time,
+            }
             if reason:
                 payload["reschedulingReason"] = reason
+                payload["reason"] = reason
 
             st.sidebar.info(f"📤 Rescheduling UID: {booking_uid} to {new_start_time}")
-            response = requests.patch(
-                f"https://api.cal.com/v1/bookings/{booking_uid}?apiKey={self.api_key}",
-                headers=self.headers, 
-                json=payload, 
-                timeout=15
-            )
-            
-            st.sidebar.info(f"📥 Response: {response.status_code}")
+
+            response = None
+            error_stack = []
+
+            # Try Cal.com v2 PATCH first
+            try:
+                response = self._make_request_with_retry(
+                    "PATCH",
+                    f"https://api.cal.com/v2/bookings/{booking_uid}",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "cal-api-version": "2024-08-13",
+                    },
+                    json=payload,
+                    timeout=15,
+                    max_retries=2,
+                )
+                st.sidebar.info(f"📥 V2 PATCH status: {response.status_code}")
+                if response.status_code >= 400:
+                    raise requests.exceptions.HTTPError(
+                        f"V2 PATCH returned {response.status_code}"
+                    )
+            except Exception as v2_patch_err:
+                error_stack.append(f"v2 PATCH failed: {str(v2_patch_err)}")
+                st.sidebar.warning(f"🔄 {error_stack[-1]} — trying v2 POST /reschedule...")
+                # Try Cal.com v2 explicit reschedule endpoint as a fallback
+                try:
+                    response = self._make_request_with_retry(
+                        "POST",
+                        f"https://api.cal.com/v2/bookings/{booking_uid}/reschedule",
+                        headers={
+                            "Authorization": f"Bearer {self.api_key}",
+                            "Content-Type": "application/json",
+                            "cal-api-version": "2024-08-13",
+                        },
+                        json=payload,
+                        timeout=15,
+                        max_retries=2,
+                    )
+                    st.sidebar.info(f"📥 V2 POST /reschedule status: {response.status_code}")
+                    if response.status_code >= 400:
+                        raise requests.exceptions.HTTPError(
+                            f"V2 POST /reschedule returned {response.status_code}"
+                        )
+                except Exception as v2_post_err:
+                    error_stack.append(f"v2 POST /reschedule failed: {str(v2_post_err)}")
+                    st.sidebar.warning(f"🔄 {error_stack[-1]} — falling back to v1 PATCH...")
+                    # Final fallback: Cal.com v1 PATCH with apiKey query param
+                    response = self._make_request_with_retry(
+                        "PATCH",
+                        f"https://api.cal.com/v1/bookings/{booking_uid}",
+                        headers={"Content-Type": "application/json"},
+                        params={"apiKey": self.api_key},
+                        json=payload,
+                        timeout=15,
+                        max_retries=2,
+                    )
+                    st.sidebar.info(f"📥 V1 PATCH status: {response.status_code}")
+                    if response.status_code >= 400:
+                        # All attempts failed; construct aggregated error
+                        error_details = {
+                            "status_code": response.status_code,
+                            "response_text": response.text,
+                            "booking_uid": booking_uid,
+                            "attempt_errors": error_stack,
+                            "api_version": "v1",
+                        }
+                        st.sidebar.error(
+                            f"❌ Reschedule failed with status {response.status_code}"
+                        )
+                        st.sidebar.code(
+                            json.dumps(error_details, indent=2), language="json"
+                        )
+                        self._log_error(
+                            "reschedule_booking",
+                            "Reschedule failed after fallbacks",
+                            error_details,
+                        )
+                        return {
+                            "success": False,
+                            "error": f"Reschedule failed: {response.text[:500]}",
+                            "error_details": error_details,
+                        }
+
+            # If we reach here, we have a non-error response
             response.raise_for_status()
-            result = response.json()
+            try:
+                result_json = response.json()
+            except Exception:
+                result_json = {}
+
             st.sidebar.success("✅ Booking rescheduled!")
-            return {"success": True, "data": result.get("data", {})}
+            return {
+                "success": True,
+                "data": result_json.get("data", result_json),
+                "api_version": "v2" if "/v2/" in response.url else "v1",
+            }
         except requests.exceptions.RequestException as e:
             error_msg = f"❌ Failed to reschedule: {str(e)}"
+            error_details: Dict[str, Any] = {}
             if hasattr(e, "response") and e.response is not None:
-                error_msg += f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
+                error_details = {
+                    "status_code": e.response.status_code,
+                    "response_text": e.response.text,
+                    "booking_uid": booking_uid,
+                }
+                error_msg += (
+                    f"\nStatus: {e.response.status_code}\nResponse: {e.response.text}"
+                )
             st.sidebar.error(error_msg)
-            return {"success": False, "error": error_msg}
+            self._log_error("reschedule_booking", error_msg, error_details)
+            return {"success": False, "error": error_msg, "error_details": error_details}
 
 
 # OpenAI function definitions
