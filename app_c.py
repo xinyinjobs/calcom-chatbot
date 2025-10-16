@@ -1,3 +1,9 @@
+"""Streamlit app integrating Cal.com and OpenAI for meeting management.
+
+This module provides a Streamlit UI and Cal.com API integration for booking,
+listing, cancelling, and rescheduling meetings. This refactor improves clarity
+with small annotations and docstrings without changing runtime behavior.
+"""
 import os
 import json
 import time
@@ -37,7 +43,7 @@ if not OPENAI_API_KEY:
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Timezone utilities
-def _get_tz(name: str):
+def _get_tz(name: str) -> Any:
     if ZoneInfo is not None:
         return ZoneInfo(name)
     if pytz_timezone is not None:
@@ -193,7 +199,7 @@ def get_booking_status(booking: Dict[str, Any]) -> tuple[str, str, str]:
     Returns:
         tuple: (status_text, emoji, streamlit_color)
     """
-    from datetime import datetime
+    # Use module-level import; avoid shadowing
     
     # Check explicit status field first
     status = str(booking.get("status", "")).lower()
@@ -239,6 +245,11 @@ def get_booking_status(booking: Dict[str, Any]) -> tuple[str, str, str]:
 
 # Cal.com API Class
 class CalComAPI:
+    """Cal.com REST client with retry, simple caching, and error logging.
+
+    This lightweight client is used by the Streamlit app to perform
+    common booking operations against Cal.com's HTTP API while providing
+    resiliency (retries) and basic diagnostics (error log)."""
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.headers = {
@@ -1943,7 +1954,7 @@ tools = [
 ]
 
 
-def safe_get_session_state(key: str, default=None):
+def safe_get_session_state(key: str, default=None) -> Any:
     """Safely get session state value with error handling"""
     try:
         return st.session_state.get(key, default)
@@ -1951,7 +1962,7 @@ def safe_get_session_state(key: str, default=None):
         st.sidebar.warning(f"Session state error for key '{key}': {str(e)}")
         return default
 
-def safe_set_session_state(key: str, value):
+def safe_set_session_state(key: str, value) -> bool:
     """Safely set session state value with error handling"""
     try:
         st.session_state[key] = value
@@ -2390,7 +2401,6 @@ def chat_with_assistant(messages: List[Dict[str, Any]], cal_api: CalComAPI) -> t
 # Streamlit UI
 def render_enhanced_bookings_section(cal_api, user_email, attendee_name, show_all=False):
     """Render enhanced bookings section with status indicators"""
-    from datetime import datetime
     
     st.markdown("---")
     st.subheader("📆 Scheduled Events")
@@ -2553,7 +2563,8 @@ def render_enhanced_bookings_section(cal_api, user_email, attendee_name, show_al
 # Update the main() function - replace the existing "Scheduled Events" section
 # (lines ~888-928) with this single function call:
 
-def main():
+def main() -> None:
+    """Streamlit entry point to configure keys, render UI, and chat loop."""
     st.set_page_config(page_title="Cal.com Chatbot", page_icon="📅", layout="wide")
 
     st.title("📅 Cal.com Meeting Assistant (PST/PDT)")
