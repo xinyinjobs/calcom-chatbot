@@ -394,262 +394,262 @@ class CalComAPI:
             }
 
     def get_available_slots(self, event_type_id: Any, start_date: str, end_date: str) -> Dict[str, Any]:
-    """
-    Get available time slots. 
-    
-    Args:
-        event_type_id: Event type ID
-        start_date: ISO UTC string (e.g., "2024-10-16T00:00:00Z" or simple "2024-10-16")
-        end_date: ISO UTC string (e.g., "2024-10-17T23:59:59Z" or simple "2024-10-17")
-    
-    Returns:
-        Dict with success status and slots list
-    """
-    try:
-        st.sidebar.info(f"🔍 Checking slots for event type {event_type_id}")
-        st.sidebar.info(f"Date range: {start_date} to {end_date}")
+        """
+        Get available time slots. 
         
-        # Clean up date strings - v2 API can accept simple dates like "2024-10-16"
-        # or full ISO strings like "2024-10-16T00:00:00Z"
-        def normalize_date(date_str: str) -> str:
-            """Normalize date to simple YYYY-MM-DD format for v2 API"""
-            try:
-                # If it's already a simple date, return as-is
-                if len(date_str) == 10 and date_str.count('-') == 2:
-                    return date_str
-                # If it's an ISO string, extract just the date part
-                if 'T' in date_str:
-                    return date_str.split('T')[0]
-                return date_str
-            except:
-                return date_str
+        Args:
+            event_type_id: Event type ID
+            start_date: ISO UTC string (e.g., "2024-10-16T00:00:00Z" or simple "2024-10-16")
+            end_date: ISO UTC string (e.g., "2024-10-17T23:59:59Z" or simple "2024-10-17")
         
-        # Try v2 API first - CORRECT endpoint is /v2/slots (not /v2/slots/available)
+        Returns:
+            Dict with success status and slots list
+        """
         try:
-            st.sidebar.info("🔄 Trying Cal.com v2 API for slots...")
+            st.sidebar.info(f"🔍 Checking slots for event type {event_type_id}")
+            st.sidebar.info(f"Date range: {start_date} to {end_date}")
             
-            # Normalize dates for v2 API
-            start_simple = normalize_date(start_date)
-            end_simple = normalize_date(end_date)
+            # Clean up date strings - v2 API can accept simple dates like "2024-10-16"
+            # or full ISO strings like "2024-10-16T00:00:00Z"
+            def normalize_date(date_str: str) -> str:
+                """Normalize date to simple YYYY-MM-DD format for v2 API"""
+                try:
+                    # If it's already a simple date, return as-is
+                    if len(date_str) == 10 and date_str.count('-') == 2:
+                        return date_str
+                    # If it's an ISO string, extract just the date part
+                    if 'T' in date_str:
+                        return date_str.split('T')[0]
+                    return date_str
+                except:
+                    return date_str
             
-            st.sidebar.info(f"📅 Using dates: start={start_simple}, end={end_simple}")
-            
-            # CRITICAL FIX: v2 API uses different parameter names!
-            # - Endpoint: /v2/slots (NOT /v2/slots/available)
-            # - Parameters: start, end (NOT startTime, endTime)
-            response = self._make_request_with_retry(
-                "GET",
-                "https://api.cal.com/v2/slots",  # ✅ CORRECT: /v2/slots
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    "cal-api-version": "2024-08-13",
-                },
-                params={
-                    "eventTypeId": event_type_id,
-                    "start": start_simple,  # ✅ CORRECT: 'start' not 'startTime'
-                    "end": end_simple,      # ✅ CORRECT: 'end' not 'endTime'
-                    "timeZone": "America/Los_Angeles",
-                },
-                timeout=15,
-                max_retries=2
-            )
-            st.sidebar.info(f"V2 API Status: {response.status_code}")
-            
-            # Don't retry on client errors
-            if 400 <= response.status_code < 500:
-                error_text = response.text[:500]
-                st.sidebar.error(f"V2 API client error ({response.status_code}): {error_text}")
+            # Try v2 API first - CORRECT endpoint is /v2/slots (not /v2/slots/available)
+            try:
+                st.sidebar.info("🔄 Trying Cal.com v2 API for slots...")
                 
-                # Provide helpful error messages
-                if response.status_code == 404:
-                    suggestion = "Event type not found. Check that the event type ID is correct and you have access to it."
-                elif response.status_code == 401:
-                    suggestion = "Authentication failed. Check that your API key is valid."
-                elif response.status_code == 403:
-                    suggestion = "Access denied. Your API key may not have permission to access this event type."
-                else:
-                    suggestion = "Check the error message above for details."
+                # Normalize dates for v2 API
+                start_simple = normalize_date(start_date)
+                end_simple = normalize_date(end_date)
                 
-                raise requests.exceptions.HTTPError(
-                    f"V2 API returned {response.status_code}: {suggestion}"
+                st.sidebar.info(f"📅 Using dates: start={start_simple}, end={end_simple}")
+                
+                # CRITICAL FIX: v2 API uses different parameter names!
+                # - Endpoint: /v2/slots (NOT /v2/slots/available)
+                # - Parameters: start, end (NOT startTime, endTime)
+                response = self._make_request_with_retry(
+                    "GET",
+                    "https://api.cal.com/v2/slots",  # ✅ CORRECT: /v2/slots
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "cal-api-version": "2024-08-13",
+                    },
+                    params={
+                        "eventTypeId": event_type_id,
+                        "start": start_simple,  # ✅ CORRECT: 'start' not 'startTime'
+                        "end": end_simple,      # ✅ CORRECT: 'end' not 'endTime'
+                        "timeZone": "America/Los_Angeles",
+                    },
+                    timeout=15,
+                    max_retries=2
                 )
-            
-            if response.status_code >= 500:
-                st.sidebar.warning(f"V2 API server error ({response.status_code}): {response.text[:200]}")
-                raise requests.exceptions.HTTPError(f"V2 API returned {response.status_code}")
+                st.sidebar.info(f"V2 API Status: {response.status_code}")
                 
-        except Exception as v2_error:
-            st.sidebar.warning(f"V2 API failed: {str(v2_error)}, trying v1...")
+                # Don't retry on client errors
+                if 400 <= response.status_code < 500:
+                    error_text = response.text[:500]
+                    st.sidebar.error(f"V2 API client error ({response.status_code}): {error_text}")
+                    
+                    # Provide helpful error messages
+                    if response.status_code == 404:
+                        suggestion = "Event type not found. Check that the event type ID is correct and you have access to it."
+                    elif response.status_code == 401:
+                        suggestion = "Authentication failed. Check that your API key is valid."
+                    elif response.status_code == 403:
+                        suggestion = "Access denied. Your API key may not have permission to access this event type."
+                    else:
+                        suggestion = "Check the error message above for details."
+                    
+                    raise requests.exceptions.HTTPError(
+                        f"V2 API returned {response.status_code}: {suggestion}"
+                    )
+                
+                if response.status_code >= 500:
+                    st.sidebar.warning(f"V2 API server error ({response.status_code}): {response.text[:200]}")
+                    raise requests.exceptions.HTTPError(f"V2 API returned {response.status_code}")
+                    
+            except Exception as v2_error:
+                st.sidebar.warning(f"V2 API failed: {str(v2_error)}, trying v1...")
+                
+                # Fallback to v1 API with full ISO timestamps
+                # v1 uses startTime/endTime parameters
+                response = self._make_request_with_retry(
+                    "GET",
+                    f"https://api.cal.com/v1/slots",
+                    headers={
+                        "Content-Type": "application/json"
+                    },
+                    params={
+                        "apiKey": self.api_key,
+                        "eventTypeId": event_type_id,
+                        "startTime": start_date,  # v1 uses 'startTime'
+                        "endTime": end_date,      # v1 uses 'endTime'
+                        "timeZone": "America/Los_Angeles",
+                    },
+                    timeout=15,
+                    max_retries=2
+                )
+                st.sidebar.info(f"V1 API Status: {response.status_code}")
             
-            # Fallback to v1 API with full ISO timestamps
-            # v1 uses startTime/endTime parameters
-            response = self._make_request_with_retry(
-                "GET",
-                f"https://api.cal.com/v1/slots",
-                headers={
-                    "Content-Type": "application/json"
-                },
-                params={
-                    "apiKey": self.api_key,
-                    "eventTypeId": event_type_id,
-                    "startTime": start_date,  # v1 uses 'startTime'
-                    "endTime": end_date,      # v1 uses 'endTime'
-                    "timeZone": "America/Los_Angeles",
-                },
-                timeout=15,
-                max_retries=2
-            )
-            st.sidebar.info(f"V1 API Status: {response.status_code}")
-        
-        # Check for errors before processing
-        if response.status_code >= 400:
-            error_details = {
-                "status_code": response.status_code,
-                "response_text": response.text,
-                "event_type_id": event_type_id,
-                "date_range": f"{start_date} to {end_date}",
-                "api_version": "v2" if "v2" in response.url else "v1"
-            }
-            st.sidebar.error(f"❌ Slot check failed with status {response.status_code}")
-            st.sidebar.code(json.dumps(error_details, indent=2), language="json")
+            # Check for errors before processing
+            if response.status_code >= 400:
+                error_details = {
+                    "status_code": response.status_code,
+                    "response_text": response.text,
+                    "event_type_id": event_type_id,
+                    "date_range": f"{start_date} to {end_date}",
+                    "api_version": "v2" if "v2" in response.url else "v1"
+                }
+                st.sidebar.error(f"❌ Slot check failed with status {response.status_code}")
+                st.sidebar.code(json.dumps(error_details, indent=2), language="json")
+                
+                return {
+                    "success": False, 
+                    "error": f"Failed to fetch slots: {response.text}",
+                    "error_details": error_details,
+                    "slots": [],
+                    "suggestion": "Check that your Cal.com event type has availability configured and the date is within your availability window"
+                }
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            st.sidebar.code(f"Raw response: {json.dumps(data, indent=2)[:1000]}", language="json")
+            
+            # Parse slots from response - handle multiple formats
+            slots: List[str] = []
+            
+            # CRITICAL: v2 API has DIFFERENT response structure than v1!
+            # v2 structure: {"status": "success", "data": {"2024-10-16": [{"start": "..."}], "2024-10-17": [...]}}
+            # v1 structure: {"slots": {"2024-10-16": [{"time": "..."}]}}
+            
+            is_v2 = "v2" in response.url
+            
+            if is_v2:
+                # V2 API response structure
+                st.sidebar.info("📋 Parsing v2 API response structure")
+                
+                if isinstance(data, dict) and data.get("status") == "success":
+                    slots_data = data.get("data", {})
+                    
+                    if isinstance(slots_data, dict):
+                        # Iterate through each date key
+                        for date_key, date_slots in slots_data.items():
+                            if isinstance(date_slots, list):
+                                for slot in date_slots:
+                                    if isinstance(slot, dict):
+                                        # v2 uses "start" key
+                                        start_time = slot.get("start") or slot.get("time")
+                                        if start_time and isinstance(start_time, str):
+                                            slots.append(start_time)
+                                    elif isinstance(slot, str):
+                                        slots.append(slot)
+                else:
+                    st.sidebar.warning("⚠️ Unexpected v2 response format")
+                    # Try generic parsing as fallback
+                    def walk_v2(obj: Any):
+                        if isinstance(obj, dict):
+                            for key in ("start", "time", "startTime"):
+                                if key in obj and isinstance(obj[key], str):
+                                    slots.append(obj[key])
+                            for v in obj.values():
+                                walk_v2(v)
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                walk_v2(item)
+                    
+                    walk_v2(data)
+            else:
+                # V1 API response structure
+                st.sidebar.info("📋 Parsing v1 API response structure")
+                
+                if isinstance(data, dict) and "slots" in data:
+                    slots_data = data["slots"]
+                    
+                    if isinstance(slots_data, dict):
+                        # Iterate through each date key
+                        for date_key, date_slots in slots_data.items():
+                            if isinstance(date_slots, list):
+                                for slot in date_slots:
+                                    if isinstance(slot, dict):
+                                        # v1 uses "time" key
+                                        time_value = slot.get("time")
+                                        if time_value and isinstance(time_value, str):
+                                            slots.append(time_value)
+                                    elif isinstance(slot, str):
+                                        slots.append(slot)
+                else:
+                    st.sidebar.warning("⚠️ Unexpected v1 response format")
+                    # Generic fallback
+                    def walk_v1(obj: Any):
+                        if isinstance(obj, dict):
+                            for key in ("time", "start", "startTime"):
+                                if key in obj and isinstance(obj[key], str):
+                                    slots.append(obj[key])
+                            for v in obj.values():
+                                walk_v1(v)
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                walk_v1(item)
+                    
+                    walk_v1(data)
+            
+            # Remove duplicates while preserving order
+            slots = list(dict.fromkeys(slots))
+            
+            st.sidebar.success(f"📅 Found {len(slots)} available slots")
+            if slots:
+                st.sidebar.info(f"First slot example: {slots[0]}")
+                if len(slots) > 1:
+                    st.sidebar.info(f"Last slot example: {slots[-1]}")
+            else:
+                st.sidebar.warning("⚠️ No slots found. This could mean:")
+                st.sidebar.info("1. No availability configured for this date")
+                st.sidebar.info("2. All slots are already booked")
+                st.sidebar.info("3. Date is outside your availability window")
             
             return {
+                "success": True, 
+                "slots": slots, 
+                "count": len(slots),
+                "event_type_id": event_type_id,
+                "api_version": "v2" if is_v2 else "v1"
+            }
+            
+        except requests.exceptions.RequestException as e:
+            error_msg = str(e)
+            error_details = {}
+            if hasattr(e, "response") and e.response is not None:
+                error_details = {
+                    "status_code": e.response.status_code,
+                    "response_text": e.response.text,
+                    "event_type_id": event_type_id,
+                    "date_range": f"{start_date} to {end_date}"
+                }
+                error_msg += f" | Status: {e.response.status_code} | Response: {e.response.text[:500]}"
+            
+            st.sidebar.error(f"❌ Slot check failed: {error_msg}")
+            st.sidebar.warning("💡 Tip: Check that your Cal.com event type has availability configured")
+            
+            # Return error with helpful message
+            return {
                 "success": False, 
-                "error": f"Failed to fetch slots: {response.text}",
+                "error": error_msg,
                 "error_details": error_details,
                 "slots": [],
-                "suggestion": "Check that your Cal.com event type has availability configured and the date is within your availability window"
+                "suggestion": "Make sure your Cal.com event type has availability hours set up and the date is within your availability window"
             }
-        
-        response.raise_for_status()
-        data = response.json()
-        
-        st.sidebar.code(f"Raw response: {json.dumps(data, indent=2)[:1000]}", language="json")
-        
-        # Parse slots from response - handle multiple formats
-        slots: List[str] = []
-        
-        # CRITICAL: v2 API has DIFFERENT response structure than v1!
-        # v2 structure: {"status": "success", "data": {"2024-10-16": [{"start": "..."}], "2024-10-17": [...]}}
-        # v1 structure: {"slots": {"2024-10-16": [{"time": "..."}]}}
-        
-        is_v2 = "v2" in response.url
-        
-        if is_v2:
-            # V2 API response structure
-            st.sidebar.info("📋 Parsing v2 API response structure")
-            
-            if isinstance(data, dict) and data.get("status") == "success":
-                slots_data = data.get("data", {})
-                
-                if isinstance(slots_data, dict):
-                    # Iterate through each date key
-                    for date_key, date_slots in slots_data.items():
-                        if isinstance(date_slots, list):
-                            for slot in date_slots:
-                                if isinstance(slot, dict):
-                                    # v2 uses "start" key
-                                    start_time = slot.get("start") or slot.get("time")
-                                    if start_time and isinstance(start_time, str):
-                                        slots.append(start_time)
-                                elif isinstance(slot, str):
-                                    slots.append(slot)
-            else:
-                st.sidebar.warning("⚠️ Unexpected v2 response format")
-                # Try generic parsing as fallback
-                def walk_v2(obj: Any):
-                    if isinstance(obj, dict):
-                        for key in ("start", "time", "startTime"):
-                            if key in obj and isinstance(obj[key], str):
-                                slots.append(obj[key])
-                        for v in obj.values():
-                            walk_v2(v)
-                    elif isinstance(obj, list):
-                        for item in obj:
-                            walk_v2(item)
-                
-                walk_v2(data)
-        else:
-            # V1 API response structure
-            st.sidebar.info("📋 Parsing v1 API response structure")
-            
-            if isinstance(data, dict) and "slots" in data:
-                slots_data = data["slots"]
-                
-                if isinstance(slots_data, dict):
-                    # Iterate through each date key
-                    for date_key, date_slots in slots_data.items():
-                        if isinstance(date_slots, list):
-                            for slot in date_slots:
-                                if isinstance(slot, dict):
-                                    # v1 uses "time" key
-                                    time_value = slot.get("time")
-                                    if time_value and isinstance(time_value, str):
-                                        slots.append(time_value)
-                                elif isinstance(slot, str):
-                                    slots.append(slot)
-            else:
-                st.sidebar.warning("⚠️ Unexpected v1 response format")
-                # Generic fallback
-                def walk_v1(obj: Any):
-                    if isinstance(obj, dict):
-                        for key in ("time", "start", "startTime"):
-                            if key in obj and isinstance(obj[key], str):
-                                slots.append(obj[key])
-                        for v in obj.values():
-                            walk_v1(v)
-                    elif isinstance(obj, list):
-                        for item in obj:
-                            walk_v1(item)
-                
-                walk_v1(data)
-        
-        # Remove duplicates while preserving order
-        slots = list(dict.fromkeys(slots))
-        
-        st.sidebar.success(f"📅 Found {len(slots)} available slots")
-        if slots:
-            st.sidebar.info(f"First slot example: {slots[0]}")
-            if len(slots) > 1:
-                st.sidebar.info(f"Last slot example: {slots[-1]}")
-        else:
-            st.sidebar.warning("⚠️ No slots found. This could mean:")
-            st.sidebar.info("1. No availability configured for this date")
-            st.sidebar.info("2. All slots are already booked")
-            st.sidebar.info("3. Date is outside your availability window")
-        
-        return {
-            "success": True, 
-            "slots": slots, 
-            "count": len(slots),
-            "event_type_id": event_type_id,
-            "api_version": "v2" if is_v2 else "v1"
-        }
-        
-    except requests.exceptions.RequestException as e:
-        error_msg = str(e)
-        error_details = {}
-        if hasattr(e, "response") and e.response is not None:
-            error_details = {
-                "status_code": e.response.status_code,
-                "response_text": e.response.text,
-                "event_type_id": event_type_id,
-                "date_range": f"{start_date} to {end_date}"
-            }
-            error_msg += f" | Status: {e.response.status_code} | Response: {e.response.text[:500]}"
-        
-        st.sidebar.error(f"❌ Slot check failed: {error_msg}")
-        st.sidebar.warning("💡 Tip: Check that your Cal.com event type has availability configured")
-        
-        # Return error with helpful message
-        return {
-            "success": False, 
-            "error": error_msg,
-            "error_details": error_details,
-            "slots": [],
-            "suggestion": "Make sure your Cal.com event type has availability hours set up and the date is within your availability window"
-        }
         
     def create_booking(
         self,
